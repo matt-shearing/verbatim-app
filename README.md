@@ -64,6 +64,7 @@ orchestrates external tools rather than embedding them. You need:
 | **PipeWire** (`parec`) | system-audio loopback capture | VoxType uses it |
 | **[Claude Code CLI](https://claude.com/claude-code)** (`claude`) | AI analysis + speaker identification | must be on `PATH` and authenticated; used headless (`claude -p`) |
 | **Ollama** (optional) | offline summaries via `--local` | only if you want a no-cloud path |
+| **PySide6** (optional) | the desktop overlay + tray icon | `pip install PySide6`; not needed for the CLI or web UI |
 | GPU transcription (optional) | ~15× real-time | ONNX; MIGraphX on AMD ROCm here, CPU otherwise |
 
 GPU/ROCm and the ECAPA/Parakeet models are all handled by VoxType, not by
@@ -93,6 +94,13 @@ verbatim rename latest "Retro"   # rename
 verbatim note latest             # rebuild the saved .md note (transcript + AI)
 verbatim note latest --no-ai     # transcript-only note (instant)
 verbatim gui                     # open the browser UI (http://127.0.0.1:8777)
+
+verbatim identify latest --who "Me, Kevin"   # AI: split & name speakers (roster optional)
+verbatim stats latest            # talk-time breakdown per speaker
+verbatim search "pricing"        # search titles, transcripts & summaries
+verbatim export latest           # shareable summary-only .md (→ ~/Meetings/summaries)
+verbatim overlay                 # floating "recording" overlay (needs PySide6)
+verbatim tray                    # system-tray icon + auto overlay (needs PySide6)
 ```
 
 Notes are written to `~/Meetings` (override with `VERBATIM_NOTES_DIR`). The
@@ -100,7 +108,10 @@ Claude model defaults to `sonnet` (override with `VERBATIM_CLAUDE_MODEL`).
 
 ## The GUI (`verbatim gui`)
 
-A localhost single-page app (stdlib only, bound to `127.0.0.1:8777`):
+A localhost single-page app (stdlib only, bound to `127.0.0.1:8777`). It has a
+**light/dark toggle** (top-right, remembered), a per-meeting **talk-time** bar,
+**full-text search** across transcripts & summaries (with snippets), and a
+one-click **summary-only export** for sharing:
 
 - **Sidebar** — searchable list of meetings, with an **✨ analyzed** badge.
 - **Start/Stop** recording from the header, with a live recording indicator.
@@ -129,6 +140,29 @@ A localhost single-page app (stdlib only, bound to `127.0.0.1:8777`):
 
 > Restart the server after upgrading (`Ctrl-C` then `verbatim gui`) — the page is
 > served from the running process, so a stale server shows the old UI.
+
+## Desktop extras — overlay & tray (optional, needs PySide6)
+
+So you never forget a recording is running:
+
+- **Recording overlay** (`verbatim overlay`) — a tiny frameless, always-on-top,
+  **draggable** pill showing ● REC, an elapsed timer and animated level bars,
+  with one-click start/stop. It remembers where you put it, auto-pops when a
+  recording starts, and gets out of the way otherwise.
+- **Tray icon** (`verbatim tray`) — a system-tray icon (grey idle → red while
+  recording) with Start/Stop, Show overlay, and Open Verbatim (web). It watches
+  the recording state and **auto-shows the overlay** whenever recording begins,
+  whoever started it (CLI, tray or web).
+
+Start the tray on login:
+
+```bash
+cp deploy/verbatim-tray.desktop ~/.config/autostart/   # set Exec= to an absolute path if ~/.local/bin isn't on the session PATH
+verbatim tray &                                        # …or just run it now
+```
+
+Both need `PySide6` and a display; they use XWayland (`QT_QPA_PLATFORM=xcb`) for
+reliable positioning + always-on-top on KDE Wayland.
 
 ## KDE global shortcut (one-key start/stop)
 

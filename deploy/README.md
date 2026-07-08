@@ -13,6 +13,7 @@ Reusable pieces for running Verbatim persistently. Full walkthrough in
 | `verbatim-autocommit.sh` | Commit & push app changes so the repo tracks the working tree |
 | `systemd/verbatim-autocommit.service` | Oneshot runner for the auto-commit |
 | `systemd/verbatim-autocommit.timer` | Periodic auto-commit (every 20 min) |
+| `verbatim-tray.desktop` | XDG autostart entry for the tray icon (needs PySide6) |
 
 ## Quick install
 

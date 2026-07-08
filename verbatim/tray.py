@@ -37,10 +37,13 @@ def _icon(color: str):
 if _HAVE_QT:
 
     class Tray(QtCore.QObject):
+        _state = QtCore.Signal(object)      # marshals worker-thread result to UI
+
         def __init__(self, app):
             super().__init__()
             self.app = app
             self.rec = None
+            self._state.connect(self._apply)
             self.tray = QtWidgets.QSystemTrayIcon(_icon("#8a929e"))
             self.menu = QtWidgets.QMenu()
             self.act_toggle = self.menu.addAction("● Start recording", self._toggle)
@@ -68,12 +71,9 @@ if _HAVE_QT:
                     mid = core.is_recording()
                 except Exception:
                     mid = None
-                QtCore.QMetaObject.invokeMethod(
-                    self, "_apply", QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(object, mid))
+                self._state.emit(mid)
             threading.Thread(target=work, daemon=True).start()
 
-        @QtCore.Slot(object)
         def _apply(self, mid):
             was = bool(self.rec)
             self.rec = mid
