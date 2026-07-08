@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically auto-commit Verbatim app changes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=20min
+Persistent=true
+Unit=verbatim-autocommit.service
+
+[Install]
+WantedBy=timers.target

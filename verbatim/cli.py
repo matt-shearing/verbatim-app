@@ -231,7 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-open", action="store_true")
     s.set_defaults(func=cmd_note)
 
-    s = sub.add_parser("label", help="name a speaker (e.g. label latest 0 Matt)")
+    s = sub.add_parser("label", help="name a speaker (e.g. label latest 0 Alice)")
     s.add_argument("id"); s.add_argument("speaker"); s.add_argument("name")
     s.set_defaults(func=cmd_label)
 

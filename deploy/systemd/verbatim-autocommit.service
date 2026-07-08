@@ -1,0 +1,10 @@
+[Unit]
+Description=Auto-commit & push Verbatim app changes to GitHub
+
+[Service]
+Type=oneshot
+# git/gh on PATH; credential.helper=store lets this push non-interactively.
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin:/bin
+# Override the repo path here if it isn't ~/dev/verbatim-app:
+# Environment=VERBATIM_REPO=%h/dev/verbatim-app
+ExecStart=%h/.local/bin/verbatim-autocommit.sh

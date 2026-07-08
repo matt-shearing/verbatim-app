@@ -1,6 +1,6 @@
 [Unit]
 Description=Verbatim meeting recorder — web GUI (http://127.0.0.1:8777)
-Documentation=https://github.com/matt-shearing/verbatim
+Documentation=https://github.com/matt-shearing/verbatim-app
 After=network.target
 
 [Service]
