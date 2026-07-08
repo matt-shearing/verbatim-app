@@ -269,9 +269,15 @@ def resolved_utterances(meeting_id: str) -> dict:
     return {"utterances": utts, "roster": attr.get("roster", []), "names": names}
 
 
-def identify_speakers(meeting_id: str, refresh: bool = False) -> dict:
+def identify_speakers(meeting_id: str, refresh: bool = False,
+                      roster: str | None = None) -> dict:
     """Use Claude to attribute each utterance to a named speaker. Caches the
-    result as the attribution override map. Returns the attribution dict."""
+    result as the attribution override map. Returns the attribution dict.
+
+    roster: optional comma/newline-separated list of who was on the call. When
+    given, Claude is told to use ONLY those names — this reliably splits a
+    merged far-end channel into the right people and stops it inventing
+    speakers. The first name is treated as the recorder ("You")."""
     m = get_meeting(meeting_id)
     if not m:
         raise VerbatimError(f"no meeting matching '{meeting_id}'")
@@ -289,6 +295,16 @@ def identify_speakers(meeting_id: str, refresh: bool = False) -> dict:
                          for u in utts)
     tmpl = (PROMPT_DIR / "identify.md").read_text(encoding="utf-8")
     prompt = tmpl.replace("{{NUMBERED}}", numbered)
+    if roster:
+        names = [n.strip() for n in re.split(r"[,;\n]", roster) if n.strip()]
+        if names:
+            prompt = (
+                "KNOWN PARTICIPANTS (ground truth — use ONLY these names, do "
+                "not invent anyone else; the first is the recorder/\"You\"):\n"
+                + "\n".join(f"- {n}" for n in names)
+                + "\n\nSplit any merged far-end speaker apart into these people "
+                  "from conversational context.\n\n" + prompt
+            )
 
     try:
         proc = subprocess.run(
@@ -594,6 +610,10 @@ def build_note(meeting_id: str, engine: str = "claude") -> tuple[Path, str]:
         parts.append(f"- **Participants:** {who}")
     if m.model:
         parts.append(f"- **Transcribed by:** {m.model}")
+    stats = speaker_stats(m.id)
+    if stats:
+        parts.append("- **Talk time:** "
+                     + ", ".join(f"{s['name']} {s['pct']}%" for s in stats[:6]))
     if intelligence:
         parts += ["", intelligence]
     parts += ["", "---", "", "## Full Transcript", "", transcript, ""]
@@ -603,3 +623,107 @@ def build_note(meeting_id: str, engine: str = "claude") -> tuple[Path, str]:
     path = note_path(m)
     path.write_text(text, encoding="utf-8")
     return path, text
+
+
+# ── Stats, search, and summary-only export ──────────────────────────────────
+def speaker_stats(meeting_id: str) -> list[dict]:
+    """Per-speaker talk-time proxy from the effective (attributed) transcript,
+    measured by word count. Returns [{name, words, lines, pct}] desc by words."""
+    try:
+        utts = resolved_utterances(meeting_id)["utterances"]
+    except VerbatimError:
+        return []
+    agg: dict[str, dict] = {}
+    total = 0
+    for u in utts:
+        name = u.get("speaker") or u.get("base") or "Unknown"
+        w = len((u.get("text") or "").split())
+        d = agg.setdefault(name, {"name": name, "words": 0, "lines": 0})
+        d["words"] += w
+        d["lines"] += 1
+        total += w
+    out = sorted(agg.values(), key=lambda d: d["words"], reverse=True)
+    for d in out:
+        d["pct"] = round(100 * d["words"] / total) if total else 0
+    return out
+
+
+def _search_snippet(text: str, idx: int, qlen: int, pad: int = 60) -> str:
+    a = max(0, idx - pad)
+    b = min(len(text), idx + qlen + pad)
+    s = text[a:b].replace("\n", " ").strip()
+    return ("…" if a > 0 else "") + s + ("…" if b < len(text) else "")
+
+
+def search_meetings(query: str, limit: int = 60) -> list[dict]:
+    """Search titles, transcripts and cached analyses. Returns meeting dicts
+    augmented with {match_in, snippet}, most-recent first."""
+    q = (query or "").strip()
+    if not q:
+        return []
+    ql = q.lower()
+    results: list[dict] = []
+    for m in list_meetings(limit=800):
+        where, snippet = None, ""
+        if ql in (m.title or "").lower():
+            where = "title"
+        else:
+            for src in ("transcript", "analysis"):
+                try:
+                    text = (export_transcript(m.id) if src == "transcript"
+                            else (get_cached_analysis(m.id) or ""))
+                except Exception:
+                    text = ""
+                idx = text.lower().find(ql)
+                if idx != -1:
+                    where, snippet = src, _search_snippet(text, idx, len(q))
+                    break
+        if where:
+            d = m.to_dict()
+            d["match_in"] = where
+            d["snippet"] = snippet
+            d["analyzed"] = analysis_cache_path(m.id).exists()
+            results.append(d)
+            if len(results) >= limit:
+                break
+    return results
+
+
+def summary_markdown(meeting_id: str) -> str:
+    """A clean, shareable summary-only note: header + AI analysis, no raw
+    transcript. Uses cached analysis; raises if none exists yet."""
+    m = get_meeting(meeting_id)
+    if not m:
+        raise VerbatimError(f"no meeting matching '{meeting_id}'")
+    analysis = get_cached_analysis(m.id)
+    if not analysis or not analysis.strip():
+        raise VerbatimError("no AI summary yet — analyze the meeting first")
+    parts = [
+        f"# {m.title or 'Untitled meeting'}",
+        "",
+        f"- **Date:** {m.started_dt.strftime('%A, %d %B %Y, %H:%M')}",
+        f"- **Duration:** {m.duration_human}",
+    ]
+    stats = speaker_stats(m.id)
+    if stats:
+        parts.append("- **Talk time:** "
+                     + ", ".join(f"{s['name']} {s['pct']}%" for s in stats[:6]))
+    parts += ["", analysis.strip(), ""]
+    return "\n".join(parts)
+
+
+def export_summary(meeting_id: str) -> Path:
+    """Write the summary-only note into a `summaries/` subfolder and return its
+    path. Kept out of the top-level notes dir on purpose so it doesn't collide
+    with (or get mistaken for) the full note in any per-meeting sync/archive."""
+    m = get_meeting(meeting_id)
+    if not m:
+        raise VerbatimError(f"no meeting matching '{meeting_id}'")
+    text = summary_markdown(m.id)
+    out_dir = NOTES_DIR / "summaries"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = m.started_dt.strftime("%Y-%m-%d %H%M")
+    title = _fs_safe(m.title or "Untitled meeting")
+    path = out_dir / f"{stamp} - {title} - summary.md"
+    path.write_text(text, encoding="utf-8")
+    return path

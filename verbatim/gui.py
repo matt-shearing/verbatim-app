@@ -52,6 +52,16 @@ INDEX = r"""<!doctype html>
  :root{--bg:#14161b;--panel:#1c1f26;--panel2:#242832;--line:#2f3542;
    --txt:#e7e9ee;--dim:#98a1b2;--acc:#5c9ded;--acc2:#3a7bd5;--red:#e0577b;
    --grn:#57c98a;--amber:#e0a458;--chip:#2b3a52}
+ :root[data-theme="light"]{--bg:#f4f6fa;--panel:#ffffff;--panel2:#eef1f6;--line:#d9dee7;
+   --txt:#1b1f27;--dim:#5b6472;--acc:#2f6bd0;--acc2:#3a7bd5;--red:#d6335f;
+   --grn:#2f9d63;--amber:#b7791f;--chip:#e4ecfa}
+ .talktime{margin:0 0 14px}
+ .ttbar{display:flex;height:8px;border-radius:5px;overflow:hidden;background:var(--panel2);margin:2px 0 6px}
+ .ttseg.c0{background:var(--acc)}.ttseg.c1{background:var(--grn)}.ttseg.c2{background:var(--amber)}.ttseg.c3{background:var(--red)}.ttseg.c4{background:#9b7ede}.ttseg.c5{background:var(--dim)}
+ .ttleg{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--dim)}
+ .ttlab i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+ .ttlab i.c0{background:var(--acc)}.ttlab i.c1{background:var(--grn)}.ttlab i.c2{background:var(--amber)}.ttlab i.c3{background:var(--red)}.ttlab i.c4{background:#9b7ede}.ttlab i.c5{background:var(--dim)}
+ .snip{color:var(--dim);font-size:11px;margin-top:5px;line-height:1.4}
  *{box-sizing:border-box}
  body{margin:0;font:14px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;
    background:var(--bg);color:var(--txt);height:100vh;display:flex;flex-direction:column}
@@ -134,12 +144,13 @@ INDEX = r"""<!doctype html>
   <span class="dot"></span><h1>VERBATIM</h1>
   <span id="recinfo" class="meta"></span>
   <span class="spacer"></span>
+  <button id="themeBtn" title="Toggle light / dark">☀</button>
   <button id="startBtn" class="primary">● Start recording</button>
   <button id="stopBtn" style="display:none">■ Stop &amp; save</button>
 </header>
 <main>
   <div id="side">
-    <input id="search" placeholder="Search meetings…">
+    <input id="search" placeholder="Search titles, transcripts, summaries…">
     <div id="list"></div>
   </div>
   <div id="detail"><div class="empty">Select a meeting, or start recording.</div></div>
@@ -147,6 +158,11 @@ INDEX = r"""<!doctype html>
 <script>
 const $=s=>document.querySelector(s), api=(u,o)=>fetch(u,o).then(r=>r.json());
 let cur=null, meetings=[], tab='summary';
+
+function applyTheme(t){document.documentElement.dataset.theme=t;localStorage.setItem('vbTheme',t);
+  const b=$('#themeBtn');if(b)b.textContent=t==='light'?'☾':'☀';}
+applyTheme(localStorage.getItem('vbTheme')||'dark');
+$('#themeBtn').onclick=()=>applyTheme(document.documentElement.dataset.theme==='light'?'dark':'light');
 
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function inline(s){return s.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>')
@@ -200,11 +216,15 @@ async function refreshStatus(){
   $('#recinfo').textContent=rec?('● Recording — '+(s.title||'')):'';
 }
 async function loadList(){
-  meetings=await api('/api/meetings?q='+encodeURIComponent($('#search').value));
+  const q=$('#search').value.trim();
+  meetings = q ? await api('/api/search?q='+encodeURIComponent(q))
+               : await api('/api/meetings');
   $('#list').innerHTML=meetings.map(m=>`<div class="item ${m.id===cur?'sel':''}" data-id="${m.id}">
     <div class="t">${esc(m.title||'(untitled)')}</div>
     <div class="m">${m.started_human} · ${m.duration_human}
-      ${m.analyzed?'<span class="badge">✨ analyzed</span>':''}</div></div>`).join('')
+      ${m.analyzed?'<span class="badge">✨</span>':''}
+      ${m.match_in&&m.match_in!=='title'?'<span class="badge">'+esc(m.match_in)+'</span>':''}</div>
+    ${m.snippet?`<div class="snip">${esc(m.snippet)}</div>`:''}</div>`).join('')
     || '<div class="empty" style="margin-top:30px">No meetings</div>';
   document.querySelectorAll('.item').forEach(e=>e.onclick=()=>openMeeting(e.dataset.id));
 }
@@ -214,13 +234,19 @@ async function openMeeting(id){
   const d=$('#detail'); d.innerHTML='<div class="empty"><span class="spin"></span></div>';
   const m=await api('/api/meeting/'+id);
   const chips=(m.speakers||[]).map(s=>`<span class="chip">${esc(s)}</span>`).join('');
+  const stats=(m.stats||[]).filter(s=>s.pct>0);
+  const tt=stats.length?`<div class="talktime"><div class="ttbar">${stats.map((s,i)=>
+    `<span class="ttseg c${i%6}" style="flex:${s.pct}" title="${esc(s.name)}: ${s.pct}% · ${s.words} words"></span>`).join('')}</div>
+    <div class="ttleg">${stats.map((s,i)=>`<span class="ttlab"><i class="c${i%6}"></i>${esc(s.name)} ${s.pct}%</span>`).join('')}</div></div>`:'';
   d.innerHTML=`
     <div class="titlerow"><input class="rn" id="rn" value="${esc(m.title||'')}"></div>
     <div class="meta">${m.started_human} · ${m.duration_human} · ${m.chunk_count} chunks · <code>${m.short_id}</code></div>
     <div class="chips">${chips||''}</div>
+    ${tt}
     <div class="bar">
       <button id="sum" class="primary">✨ ${m.analyzed?'Re-analyze':'Analyze with Claude'}</button>
       <button id="copy">⧉ Copy summary</button>
+      <button id="exp">⬇ Summary .md</button>
       <button id="ident">🧠 Identify speakers (AI)</button>
       <button id="note">💾 Save .md note</button>
       <button id="lbl">🏷 Label speakers</button>
@@ -248,6 +274,12 @@ async function openMeeting(id){
   $('#ident').onclick=doIdentify;
   $('#copy').onclick=()=>{navigator.clipboard.writeText(window._analysis||'');
     $('#copy').textContent='✓ Copied'};
+  $('#exp').onclick=async()=>{const r=await fetch('/api/meeting/'+id+'/summary-md');
+    if(!r.ok){alert((await r.text())||'No summary yet — analyze first');return}
+    const blob=await r.blob(),a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download=((m.title||'summary').replace(/[^\w -]+/g,'').trim()||'summary')+' - summary.md';
+    a.click();URL.revokeObjectURL(a.href)};
   $('#note').onclick=async e=>{e.target.innerHTML='<span class="spin"></span> Saving…';
     const r=await api('/api/meeting/'+id+'/note',{method:'POST'});
     e.target.textContent=r.path?'✓ Saved .md':'⚠ failed'; if(r.error)alert(r.error)};
@@ -304,12 +336,14 @@ async function renderTranscript(id, pane){
   }});
 }
 async function doIdentify(){
+  const who=prompt('Who was on this call? Comma-separated names (optional — but greatly improves splitting & naming, e.g. "Me, Kevin"):','');
+  if(who===null)return;
   const id=cur; tab='transcript'; await openMeeting(id);
   const pane=$('#pane');
   const banner=document.createElement('div'); banner.className='ident-banner';
   banner.innerHTML='<span class="spin"></span> Claude is identifying who each speaker is… (~1–2 min for long meetings; safe to come back later)';
   pane.prepend(banner);
-  await fetch('/api/meeting/'+id+'/identify',{method:'POST'});
+  await fetch('/api/meeting/'+id+'/identify',{method:'POST',body:JSON.stringify({who})});
   const poll=async()=>{if(cur!==id)return;
     let s; try{s=await api('/api/meeting/'+id+'/identify-status')}catch(e){setTimeout(poll,3000);return}
     if(s.error){banner.innerHTML='⚠ '+esc(s.error);return}
@@ -424,6 +458,9 @@ class Handler(BaseHTTPRequestHandler):
                     d["analyzed"] = core.analysis_cache_path(m.id).exists()
                     out.append(d)
                 return self._json(out)
+            if p == "/api/search":
+                q = parse_qs(u.query).get("q", [""])[0]
+                return self._json(core.search_meetings(q))
             if p.startswith("/api/meeting/"):
                 parts = p.split("/")
                 mid = parts[3]
@@ -436,11 +473,19 @@ class Handler(BaseHTTPRequestHandler):
                     d["speakers"] = [s["label"] or s["raw"] for s in d["speaker_slots"]]
                     d["analysis"] = core.get_cached_analysis(m.id) or ""
                     d["analyzed"] = bool(d["analysis"])
+                    d["stats"] = core.speaker_stats(m.id)
                     return self._json(d)
                 if parts[4] == "transcript":
                     return self._text(core.export_transcript(mid))
                 if parts[4] == "analysis":
                     return self._text(core.get_cached_analysis(mid) or "")
+                if parts[4] == "summary-md":
+                    try:
+                        md = core.summary_markdown(mid)
+                    except VerbatimError as e:
+                        return self._text(str(e), 400)
+                    return self._send(200, md.encode(),
+                                      "text/markdown; charset=utf-8")
                 if parts[4] == "analysis-status":
                     m = core.get_meeting(mid)
                     if not m:
@@ -493,8 +538,10 @@ class Handler(BaseHTTPRequestHandler):
                     m = core.get_meeting(mid)
                     if not m:
                         return self._json({"error": "not found"}, 404)
+                    roster = (b.get("who") or "").strip() or None
                     _start_job(m.id, "identify",
-                               lambda i: core.identify_speakers(i, refresh=True))
+                               lambda i: core.identify_speakers(i, refresh=True,
+                                                                roster=roster))
                     return self._json({"status": "started"})
                 if action == "set-speaker":
                     core.set_line_speaker(mid, int(b.get("line")), b.get("name", ""))

@@ -170,6 +170,59 @@ def _open_file(path: str) -> None:
         webbrowser.open(f"file://{path}")
 
 
+def cmd_identify(a) -> int:
+    print("🧠 Identifying speakers with Claude…", file=sys.stderr)
+    attr = core.identify_speakers(a.id, refresh=a.refresh, roster=a.who)
+    from collections import Counter
+    for name, n in Counter(attr.get("lines", {}).values()).most_common():
+        print(f"  {name:<24} {n} lines")
+    print("✓ Speakers attributed. Rebuild the note with `verbatim note`.")
+    return 0
+
+
+def cmd_stats(a) -> int:
+    rows = core.speaker_stats(a.id)
+    if not rows:
+        return _err("no transcript to measure")
+    for s in rows:
+        print(f"{s['pct']:>3}%  {s['name']:<24} {s['words']:>6} words  "
+              f"{s['lines']:>4} lines")
+    return 0
+
+
+def cmd_search(a) -> int:
+    hits = core.search_meetings(a.query, limit=a.limit)
+    if not hits:
+        print("No matches.")
+        return 0
+    for d in hits:
+        print(f"{d['short_id']}  {d['started_human']}  [{d['match_in']}]  "
+              f"{d['title'] or '(untitled)'}")
+        if d.get("snippet"):
+            print(f"        {d['snippet']}")
+    return 0
+
+
+def cmd_export(a) -> int:
+    path = core.export_summary(a.id)
+    print(f"✓ Saved summary: {path}")
+    if not a.no_open:
+        _open_file(str(path))
+    return 0
+
+
+def cmd_overlay(a) -> int:
+    from . import overlay
+    overlay.run()
+    return 0
+
+
+def cmd_tray(a) -> int:
+    from . import tray
+    tray.run()
+    return 0
+
+
 # ── parser ──────────────────────────────────────────────────────────────────
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -251,6 +304,32 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, default=8777)
     s.add_argument("--no-browser", action="store_true")
     s.set_defaults(func=cmd_gui)
+
+    s = sub.add_parser("identify", help="AI: attribute each line to a named speaker")
+    s.add_argument("id")
+    s.add_argument("--who", help='known participants, comma-separated (e.g. "Me, Kevin")')
+    s.add_argument("--refresh", action="store_true", help="re-run even if cached")
+    s.set_defaults(func=cmd_identify)
+
+    s = sub.add_parser("stats", help="speaker talk-time breakdown")
+    s.add_argument("id")
+    s.set_defaults(func=cmd_stats)
+
+    s = sub.add_parser("search", help="search titles, transcripts & summaries")
+    s.add_argument("query")
+    s.add_argument("--limit", type=int, default=60)
+    s.set_defaults(func=cmd_search)
+
+    s = sub.add_parser("export", help="save a shareable summary-only .md (no transcript)")
+    s.add_argument("id")
+    s.add_argument("--no-open", action="store_true")
+    s.set_defaults(func=cmd_export)
+
+    s = sub.add_parser("overlay", help="floating 'recording' overlay (needs PySide6)")
+    s.set_defaults(func=cmd_overlay)
+
+    s = sub.add_parser("tray", help="system tray icon (needs PySide6)")
+    s.set_defaults(func=cmd_tray)
     return p
 
 
