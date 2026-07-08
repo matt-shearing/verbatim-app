@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local runtime / private data — must NEVER be committed
+*.log
+verbatim_log.txt
+service_state.json
+Meetings/
+recordings/
+attribution/
+analysis/
+*.sqlite
+*.sqlite3
+*.db

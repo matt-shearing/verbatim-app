@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic Verbatim notes sync (safety net for in-place regenerations)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Persistent=true
+Unit=verbatim-sync.service
+
+[Install]
+WantedBy=timers.target

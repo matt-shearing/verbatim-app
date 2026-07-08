@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch the Verbatim notes dir and sync new notes into the archive folder
+
+[Path]
+# Fires when a note is added/removed in ~/Meetings (i.e. a new meeting is saved).
+PathModified=%h/Meetings
+Unit=verbatim-sync.service
+
+[Install]
+WantedBy=default.target

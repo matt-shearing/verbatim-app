@@ -1,0 +1,9 @@
+[Unit]
+Description=Sync Verbatim meeting notes (summary + transcript) into an archive folder
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/verbatim-sync-notes.sh
+# Destination the notes are mirrored into. Override here or via a drop-in
+# (`systemctl --user edit verbatim-sync.service`). Defaults inside the script.
+# Environment=VERBATIM_SYNC_DEST=%h/meeting-notes-archive

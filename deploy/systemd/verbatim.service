@@ -1,0 +1,17 @@
+[Unit]
+Description=Verbatim meeting recorder — web GUI (http://127.0.0.1:8777)
+Documentation=https://github.com/matt-shearing/verbatim
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/verbatim gui --no-browser
+Restart=on-failure
+RestartSec=5
+Environment=XDG_RUNTIME_DIR=%t
+# Include ~/.local/bin so the `claude` CLI (and other user-installed tools) resolve.
+# Without this a systemd service can't find `claude`/`voxtype` and AI analysis fails.
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
