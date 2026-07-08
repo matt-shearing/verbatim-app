@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,7 @@ def cmd_start(a) -> int:
     print("  (loading model + opening mic/system capture…)")
     mid = core.start_meeting(title, diarization=diar, wait=not a.no_wait)
     _notify("Recording started", title)
+    _spawn_overlay()
     if mid:
         print(f"✓ Recording — id {mid[:8]}")
         print("  Stop with:  verbatim stop")
@@ -168,6 +170,19 @@ def _open_file(path: str) -> None:
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
         webbrowser.open(f"file://{path}")
+
+
+def _spawn_overlay() -> None:
+    """Best-effort: pop the floating recording overlay if a display is present
+    and it isn't already up (its own single-instance guard handles dupes)."""
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return
+    try:
+        subprocess.Popen([sys.executable, "-m", "verbatim", "overlay"],
+                         start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 def cmd_identify(a) -> int:
