@@ -10,6 +10,9 @@ Reusable pieces for running Verbatim persistently. Full walkthrough in
 | `systemd/verbatim-sync.service` | Oneshot runner for the sync script |
 | `systemd/verbatim-sync.path` | Fires the sync the moment a new note is saved |
 | `systemd/verbatim-sync.timer` | Periodic sync (safety net for regenerations) |
+| `verbatim-autocommit.sh` | Commit & push app changes so the repo tracks the working tree |
+| `systemd/verbatim-autocommit.service` | Oneshot runner for the auto-commit |
+| `systemd/verbatim-autocommit.timer` | Periodic auto-commit (every 20 min) |
 
 ## Quick install
 
@@ -25,7 +28,18 @@ cp verbatim-sync-notes.sh ~/.local/bin/ && chmod +x ~/.local/bin/verbatim-sync-n
 cp systemd/verbatim-sync.* ~/.config/systemd/user/
 export VERBATIM_SYNC_DEST="$HOME/meeting-notes-archive"   # where notes are mirrored
 systemctl --user enable --now verbatim-sync.path verbatim-sync.timer
+
+# 3) Auto-commit app changes to GitHub (optional)
+cp verbatim-autocommit.sh ~/.local/bin/ && chmod +x ~/.local/bin/verbatim-autocommit.sh
+cp systemd/verbatim-autocommit.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now verbatim-autocommit.timer
 ```
+
+Auto-commit relies on `git`'s stored credentials (`credential.helper=store`)
+so the timer can push without a prompt. Commits every 20 min **only when there
+are changes**; message is `auto-sync: …`. Pause with
+`systemctl --user disable --now verbatim-autocommit.timer`.
 
 ## Notes
 
