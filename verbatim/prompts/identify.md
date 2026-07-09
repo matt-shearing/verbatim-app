@@ -13,6 +13,13 @@ Be consistent: the same person must get the exact same name on every line. If yo
 truly cannot tell, reuse the most likely current participant rather than inventing
 a new one; use "Unknown Speaker" only as a last resort.
 
+Prefer the FEWEST speakers that fit. Only introduce a distinct person when there
+is clear evidence — a stated name, a direct address, or an unmistakably different
+role. Do NOT add a speaker to explain unclear audio, crosstalk, mis-transcription
+or brief backchannel ("yeah", "mm-hm", "right") — attribute those to whoever holds
+the floor. Most calls have just two people. If a roster of known participants was
+given above, use ONLY those names and never exceed them.
+
 Speakers talk in runs of consecutive lines. Output the attribution as those runs
 — one entry per maximal run of consecutive lines spoken by the same person. A run
 boundary can fall anywhere the speaker changes, **including inside a single
