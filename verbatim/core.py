@@ -202,9 +202,23 @@ _UTT_RE = re.compile(r"^\*\[([^\]]+)\]\*\s*(.*)$")
 _HDR_RE = re.compile(r"^###\s+(.+?)\s*$")
 
 
+def _speaker_seq(md: str) -> list[str]:
+    """The speaker header in effect for each utterance line, in order."""
+    seq, cur = [], "Speaker"
+    for ln in md.splitlines():
+        h = _HDR_RE.match(ln)
+        if h:
+            cur = h.group(1).strip()
+            continue
+        if _UTT_RE.match(ln.strip()):
+            seq.append(cur)
+    return seq
+
+
 def utterances(meeting_id: str) -> list[dict]:
     """Parse the labeled transcript into ordered utterances:
-    {i, t, base, text} where base is the acoustic/label speaker."""
+    {i, t, base, text, raw} — base is the label/effective speaker header, raw is
+    the underlying acoustic designation (SPEAKER_0N / You / Remote)."""
     md = export_transcript(meeting_id)  # label-applied markdown
     utts, cur, i = [], "Speaker", 0
     for ln in md.splitlines():
@@ -216,7 +230,25 @@ def utterances(meeting_id: str) -> list[dict]:
         if u:
             utts.append({"i": i, "t": u.group(1), "base": cur, "text": u.group(2)})
             i += 1
+    try:
+        raw = _speaker_seq(export_transcript(meeting_id, apply_labels=False))
+        for u in utts:
+            u["raw"] = raw[u["i"]] if u["i"] < len(raw) else u["base"]
+    except Exception:
+        for u in utts:
+            u["raw"] = u["base"]
     return utts
+
+
+def pretty_speaker(tag: str) -> str:
+    """Friendly acoustic designation: 'SPEAKER_00' -> 'Speaker 0'."""
+    m = re.match(r"speaker[_ ]0*(\d+)$", (tag or "").strip(), re.I)
+    return f"Speaker {int(m.group(1))}" if m else (tag or "").strip()
+
+
+def _is_raw_tag(name: str) -> bool:
+    return bool(re.match(r"(speaker[_ ]0*\d+|remote|you)$",
+                         (name or "").strip(), re.I))
 
 
 def attribution_path(full_id: str) -> Path:
@@ -613,7 +645,7 @@ def build_note(meeting_id: str, engine: str = "claude") -> tuple[Path, str]:
     stats = speaker_stats(m.id)
     if stats:
         parts.append("- **Talk time:** "
-                     + ", ".join(f"{s['name']} {s['pct']}%" for s in stats[:6]))
+                     + ", ".join(f"{_fmt_speaker(s)} {s['pct']}%" for s in stats[:6]))
     if intelligence:
         parts += ["", intelligence]
     parts += ["", "---", "", "## Full Transcript", "", transcript, ""]
@@ -626,9 +658,18 @@ def build_note(meeting_id: str, engine: str = "claude") -> tuple[Path, str]:
 
 
 # ── Stats, search, and summary-only export ──────────────────────────────────
+def _fmt_speaker(s: dict) -> str:
+    """'Matt (Speaker 0)' when a tag adds info, else just the name."""
+    return f"{s['name']} ({s['tag']})" if s.get("tag") else s["name"]
+
+
 def speaker_stats(meeting_id: str) -> list[dict]:
-    """Per-speaker talk-time proxy from the effective (attributed) transcript,
-    measured by word count. Returns [{name, words, lines, pct}] desc by words."""
+    """Per-speaker talk-time (word-count proxy) from the effective transcript.
+    Returns [{name, tag, words, lines, pct}] desc — `name` is the person's
+    display name, `tag` is the acoustic designation (e.g. 'Speaker 0'), shown in
+    brackets only when it adds information (i.e. the speaker has a real name)."""
+    m = get_meeting(meeting_id)
+    meeting_id = m.id if m else meeting_id          # resolve short id → full
     try:
         utts = resolved_utterances(meeting_id)["utterances"]
     except VerbatimError:
@@ -637,14 +678,29 @@ def speaker_stats(meeting_id: str) -> list[dict]:
     total = 0
     for u in utts:
         name = u.get("speaker") or u.get("base") or "Unknown"
+        raw = u.get("raw") or u.get("base") or name
         w = len((u.get("text") or "").split())
-        d = agg.setdefault(name, {"name": name, "words": 0, "lines": 0})
+        d = agg.setdefault(name, {"name": name, "words": 0, "lines": 0, "tags": {}})
         d["words"] += w
         d["lines"] += 1
+        d["tags"][raw] = d["tags"].get(raw, 0) + 1
         total += w
-    out = sorted(agg.values(), key=lambda d: d["words"], reverse=True)
-    for d in out:
-        d["pct"] = round(100 * d["words"] / total) if total else 0
+    labels = speaker_labels(meeting_id)          # {num: name} → recover Speaker N
+    name_nums: dict[str, list[int]] = {}
+    for num, nm in labels.items():
+        name_nums.setdefault(nm, []).append(num)
+    out = []
+    for d in sorted(agg.values(), key=lambda x: x["words"], reverse=True):
+        raw = max(d["tags"], key=d["tags"].get) if d["tags"] else d["name"]
+        unlabeled = _is_raw_tag(d["name"])
+        disp = pretty_speaker(d["name"]) if unlabeled else d["name"]
+        praw = pretty_speaker(raw)
+        tag = "" if unlabeled or disp == praw else praw
+        if not tag and d["name"] in name_nums:   # labeled: reuse the acoustic id
+            tag = "Speaker " + "/".join(str(n) for n in sorted(name_nums[d["name"]]))
+        out.append({"name": disp, "tag": tag, "words": d["words"],
+                    "lines": d["lines"],
+                    "pct": round(100 * d["words"] / total) if total else 0})
     return out
 
 
@@ -707,7 +763,7 @@ def summary_markdown(meeting_id: str) -> str:
     stats = speaker_stats(m.id)
     if stats:
         parts.append("- **Talk time:** "
-                     + ", ".join(f"{s['name']} {s['pct']}%" for s in stats[:6]))
+                     + ", ".join(f"{_fmt_speaker(s)} {s['pct']}%" for s in stats[:6]))
     parts += ["", analysis.strip(), ""]
     return "\n".join(parts)
 

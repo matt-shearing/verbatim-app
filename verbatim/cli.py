@@ -200,7 +200,8 @@ def cmd_stats(a) -> int:
     if not rows:
         return _err("no transcript to measure")
     for s in rows:
-        print(f"{s['pct']:>3}%  {s['name']:<24} {s['words']:>6} words  "
+        who = f"{s['name']} ({s['tag']})" if s.get("tag") else s["name"]
+        print(f"{s['pct']:>3}%  {who:<26} {s['words']:>6} words  "
               f"{s['lines']:>4} lines")
     return 0
 

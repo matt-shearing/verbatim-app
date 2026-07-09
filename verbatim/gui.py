@@ -62,6 +62,7 @@ INDEX = r"""<!doctype html>
  .ttlab i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
  .ttlab i.c0{background:var(--acc)}.ttlab i.c1{background:var(--grn)}.ttlab i.c2{background:var(--amber)}.ttlab i.c3{background:var(--red)}.ttlab i.c4{background:#9b7ede}.ttlab i.c5{background:var(--dim)}
  .snip{color:var(--dim);font-size:11px;margin-top:5px;line-height:1.4}
+ .rawtag{color:var(--dim);font-size:11px;font-weight:400;margin-left:2px}
  *{box-sizing:border-box}
  body{margin:0;font:14px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;
    background:var(--bg);color:var(--txt);height:100vh;display:flex;flex-direction:column}
@@ -165,6 +166,8 @@ applyTheme(localStorage.getItem('vbTheme')||'dark');
 $('#themeBtn').onclick=()=>applyTheme(document.documentElement.dataset.theme==='light'?'dark':'light');
 
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function prettyTag(t){const m=(t||'').match(/^speaker[_ ]0*(\d+)$/i);return m?'Speaker '+(+m[1]):(t||'')}
+function isRawName(n){return /^(speaker[_ ]0*\d+|remote|you)$/i.test((n||'').trim())}
 function inline(s){return s.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>')
   .replace(/`(.+?)`/g,'<code>$1</code>')
   .replace(/\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g,'<span class="ts">[$1]</span>')}
@@ -237,7 +240,7 @@ async function openMeeting(id){
   const stats=(m.stats||[]).filter(s=>s.pct>0);
   const tt=stats.length?`<div class="talktime"><div class="ttbar">${stats.map((s,i)=>
     `<span class="ttseg c${i%6}" style="flex:${s.pct}" title="${esc(s.name)}: ${s.pct}% · ${s.words} words"></span>`).join('')}</div>
-    <div class="ttleg">${stats.map((s,i)=>`<span class="ttlab"><i class="c${i%6}"></i>${esc(s.name)} ${s.pct}%</span>`).join('')}</div></div>`:'';
+    <div class="ttleg">${stats.map((s,i)=>`<span class="ttlab"><i class="c${i%6}"></i>${esc(s.name)}${s.tag?' <span class="rawtag">('+esc(s.tag)+')</span>':''} ${s.pct}%</span>`).join('')}</div></div>`:'';
   d.innerHTML=`
     <div class="titlerow"><input class="rn" id="rn" value="${esc(m.title||'')}"></div>
     <div class="meta">${m.started_human} · ${m.duration_human} · ${m.chunk_count} chunks · <code>${m.short_id}</code></div>
@@ -317,10 +320,13 @@ async function renderTranscript(id, pane){
   pane.innerHTML=hint+blocks.map(b=>{
     const opts=names.map(n=>`<option${n===b.speaker?' selected':''}>${esc(n)}</option>`).join('');
     const ai=b.lines.some(l=>l.ai);
+    const raws={}; b.lines.forEach(l=>{const r=l.raw||'';if(r)raws[r]=(raws[r]||0)+1});
+    const braw=Object.keys(raws).sort((a,c)=>raws[c]-raws[a])[0]||'';
+    const rawlbl=(!isRawName(b.speaker)&&braw)?prettyTag(braw):'';
     return `<div class="block"><div class="spkrow">
       <select class="spksel" data-cur="${esc(b.speaker)}" data-lines="${b.lines.map(l=>l.i).join(',')}">
         ${opts}<option value="__new">➕ New name…</option><option value="__rename">✎ Rename everywhere…</option>
-      </select>${ai?'<span class="aitag">AI</span>':''}</div>`+
+      </select>${rawlbl?'<span class="rawtag">('+esc(rawlbl)+')</span>':''}${ai?'<span class="aitag">AI</span>':''}</div>`+
       b.lines.map(l=>`<div class="seg"><span class="ts">[${l.t}]</span>${esc(l.text)}</div>`).join('')+
       `</div>`;
   }).join('');
@@ -470,7 +476,10 @@ class Handler(BaseHTTPRequestHandler):
                         return self._json({"error": "not found"}, 404)
                     d = m.to_dict()
                     d["speaker_slots"] = self._speaker_slots(m.id)
-                    d["speakers"] = [s["label"] or s["raw"] for s in d["speaker_slots"]]
+                    d["speakers"] = [
+                        (f"{s['label']} ({core.pretty_speaker(s['raw'])})"
+                         if s["label"] else core.pretty_speaker(s["raw"]))
+                        for s in d["speaker_slots"]]
                     d["analysis"] = core.get_cached_analysis(m.id) or ""
                     d["analyzed"] = bool(d["analysis"])
                     d["stats"] = core.speaker_stats(m.id)
