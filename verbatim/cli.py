@@ -29,7 +29,9 @@ def cmd_start(a) -> int:
     if core.is_recording():
         return _err("a meeting is already recording (use `verbatim stop`)")
     title = a.title or f"Meeting {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    diar = "ml" if a.ml else None
+    # None = inherit VoxType's [meeting.diarization] backend (configured as "ml").
+    # The flags are explicit overrides for a single meeting.
+    diar = "simple" if a.simple else ("ml" if a.ml else None)
     print(f"● Starting meeting: {title}")
     print("  (loading model + opening mic/system capture…)")
     mid = core.start_meeting(title, diarization=diar, wait=not a.no_wait)
@@ -258,7 +260,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("start", help="start recording a meeting")
     s.add_argument("title", nargs="?", help="meeting title")
     s.add_argument("--ml", action="store_true",
-                   help="ML multi-speaker diarization (default: You/Remote)")
+                   help="force ML multi-speaker diarization (ECAPA embeddings)")
+    s.add_argument("--simple", action="store_true",
+                   help="force simple You/Remote diarization (1:1 calls only)")
     s.add_argument("--no-wait", action="store_true",
                    help="don't wait for the recording to confirm")
     s.set_defaults(func=cmd_start)
