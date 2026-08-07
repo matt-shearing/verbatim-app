@@ -37,12 +37,12 @@ CLAUDE_MODEL = os.environ.get("VERBATIM_CLAUDE_MODEL", "sonnet")
 # AI engine: "local" (an OpenAI-compatible server on this machine or the LAN —
 # nothing leaves the network) or "claude" (Claude Code CLI, cloud).
 AI_ENGINE = os.environ.get("VERBATIM_AI_ENGINE", "local")
-# Default is the SSH tunnel to gpu-node (verbatim-ai-tunnel.service); point this
-# straight at a LAN host (e.g. http://gpu-node:11434) if its firewall allows.
+# Default is the SSH tunnel to the GPU node (verbatim-ai-tunnel.service); point
+# this straight at a LAN host (e.g. http://gpu-node:11434) if its firewall allows.
 LOCAL_URL = os.environ.get("VERBATIM_LOCAL_URL", "http://127.0.0.1:11435").rstrip("/")
 # gemma4:12b won head-to-head testing (2026-08): perfect speaker attribution
 # and clean analysis with thinking off; qwen3.5:9b misattributed speakers
-# without thinking and rambled unusably with it. Both are pulled on gpu-node.
+# without thinking and rambled unusably with it. Both are pulled on the GPU node.
 LOCAL_MODEL = os.environ.get("VERBATIM_LOCAL_MODEL", "gemma4:12b")
 PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 
