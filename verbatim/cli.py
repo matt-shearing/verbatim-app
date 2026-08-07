@@ -8,6 +8,7 @@ import subprocess
 import sys
 import webbrowser
 from datetime import datetime
+from pathlib import Path
 
 from . import core
 from .core import VerbatimError
@@ -110,6 +111,39 @@ def cmd_status(a) -> int:
     return 0
 
 
+def cmd_audio_dir(a) -> int:
+    """Show or set where meeting audio is archived."""
+    if a.path:
+        core.write_config(audio_dir=str(Path(a.path).expanduser()))
+    configured = (os.environ.get("VERBATIM_AUDIO_DIR")
+                  or core.read_config().get("audio_dir"))
+    try:
+        active, warning = core.resolve_audio_dir()
+    except VerbatimError as e:
+        return _err(str(e))
+    print(f"configured: {configured or '(none — using default)'}")
+    print(f"active:     {active}")
+    if warning:
+        print(f"⚠  {warning}", file=sys.stderr)
+    free = shutil.disk_usage(active).free / 1e9
+    print(f"free space: {free:.1f} GB  (~{free * 1000 / 8:.0f} hours at 8 MB/hour)")
+    return 0
+
+
+def cmd_audio(a) -> int:
+    """Print (or open) the archived audio for a meeting."""
+    m = core.get_meeting(a.id)
+    if not m:
+        return _err(f"no meeting matching '{a.id}'")
+    p = core.audio_path_for(m.id)
+    if not p:
+        return _err(f"no archived audio for '{m.title or m.short_id}'")
+    print(p)
+    if a.open:
+        _open_file(str(p))
+    return 0
+
+
 def cmd_list(a) -> int:
     ms = core.list_meetings(limit=a.limit, query=a.query)
     if not ms:
@@ -198,9 +232,7 @@ def _spawn_overlay() -> None:
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         return
     try:
-        subprocess.Popen([sys.executable, "-m", "verbatim", "overlay"],
-                         start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        core.spawn_overlay()
     except Exception:
         pass
 
@@ -276,6 +308,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-wait", action="store_true",
                    help="don't wait for the recording to confirm")
     s.set_defaults(func=cmd_start)
+
+    s = sub.add_parser("audio-dir",
+                       help="show or set where meeting audio is archived")
+    s.add_argument("path", nargs="?",
+                   help="directory to store recordings (e.g. /mnt/archive/verbatim)")
+    s.set_defaults(func=cmd_audio_dir)
+
+    s = sub.add_parser("audio", help="path to a meeting's archived audio")
+    s.add_argument("id", nargs="?", default="latest")
+    s.add_argument("--open", action="store_true", help="open it in a player")
+    s.set_defaults(func=cmd_audio)
 
     def _ai_flags(sp):
         sp.add_argument("--local", action="store_true",

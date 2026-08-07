@@ -132,9 +132,7 @@ if _HAVE_QT:
             threading.Thread(target=work, daemon=True).start()
 
         def _overlay(self):
-            subprocess.Popen([sys.executable, "-m", "verbatim", "overlay"],
-                             start_new_session=True,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            core.spawn_overlay()
 
         def _web(self):
             webbrowser.open("http://127.0.0.1:8777/")

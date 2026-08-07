@@ -18,6 +18,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -80,8 +81,221 @@ MEETING_PARAKEET_MODEL = os.environ.get(
 AUTO_MODE_SWITCH = os.environ.get("VERBATIM_AUTO_MODE_SWITCH", "1") != "0"
 
 
+# ── Meeting audio archive ───────────────────────────────────────────────────
+# VoxType's `retain_audio` is plumbed but NOT implemented in 0.7.5 — nothing
+# ever writes audio and `audio_retained` is always false. So four meetings that
+# failed to transcribe were unrecoverable, including a 118-minute one. Verbatim
+# therefore keeps its own archival copy, always.
+#
+# Where it goes, in priority order:
+#   1. $VERBATIM_AUDIO_DIR
+#   2. "audio_dir" in ~/.config/verbatim/config.json  (`verbatim audio-dir <path>`)
+#   3. ~/Meetings/audio
+#
+# Mixed mic + system-output, mono 16 kHz Opus @24k ≈ 8 MB/hour, which is both
+# cheap to keep forever and exactly what MOSS/Whisper want as input.
+CONFIG_FILE = Path(
+    os.environ.get("VERBATIM_CONFIG", HOME / ".config/verbatim/config.json"))
+AUDIO_FALLBACK = NOTES_DIR / "audio"
+AUDIO_BITRATE = os.environ.get("VERBATIM_AUDIO_BITRATE", "24k")
+# Refuse a destination with less headroom than this; a meeting can run 3 hours.
+AUDIO_MIN_FREE_MB = int(os.environ.get("VERBATIM_AUDIO_MIN_FREE_MB", "500"))
+_CAPTURE_STATE = _VERBATIM_STATE / "audio-capture.json"
+
+
 class VerbatimError(RuntimeError):
     pass
+
+
+def read_config() -> dict:
+    try:
+        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_config(**kv) -> dict:
+    cfg = read_config()
+    cfg.update({k: v for k, v in kv.items() if v is not None})
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    return cfg
+
+
+def _dir_usable(d: Path) -> str | None:
+    """Return a reason the directory is unusable, or None if it is fine.
+
+    The important case is a removable/udisks mount such as
+    /run/media/<user>/<label>: when the drive is absent the path may still be
+    creatable, and we would quietly fill the root filesystem instead. So for
+    those roots we require an actual mount point.
+    """
+    try:
+        parts = d.resolve().parts
+        for base in ("/run/media", "/media", "/mnt"):
+            b = Path(base)
+            if str(d.resolve()).startswith(base + "/"):
+                # The mount point is the path element just under <base>[/<user>]
+                depth = len(b.parts) + (2 if base == "/run/media" else 1)
+                if len(parts) >= depth:
+                    mp = Path(*parts[:depth])
+                    if not os.path.ismount(mp):
+                        return f"{mp} is not mounted"
+                break
+        d.mkdir(parents=True, exist_ok=True)
+        probe = d / ".verbatim-write-test"
+        probe.touch()
+        probe.unlink()
+        free_mb = shutil.disk_usage(d).free // (1024 * 1024)
+        if free_mb < AUDIO_MIN_FREE_MB:
+            return f"only {free_mb} MB free (need {AUDIO_MIN_FREE_MB} MB)"
+    except OSError as e:
+        return str(e)
+    return None
+
+
+def resolve_audio_dir() -> tuple[Path, str | None]:
+    """Pick where to write meeting audio. Returns (dir, warning-or-None).
+
+    Never returns "nowhere": if the configured location is unavailable (drive
+    unplugged, full) it falls back to the local directory and warns loudly.
+    Losing a meeting because a disk is absent would be far worse than storing
+    it somewhere less convenient.
+    """
+    configured = os.environ.get("VERBATIM_AUDIO_DIR") or read_config().get("audio_dir")
+    if configured:
+        d = Path(configured).expanduser()
+        why = _dir_usable(d)
+        if not why:
+            return d, None
+        why2 = _dir_usable(AUDIO_FALLBACK)
+        if why2:
+            raise VerbatimError(
+                f"nowhere to store meeting audio: {d} unusable ({why}) and "
+                f"fallback {AUDIO_FALLBACK} unusable ({why2})")
+        return AUDIO_FALLBACK, (
+            f"audio location {d} is unusable ({why}) — recording to "
+            f"{AUDIO_FALLBACK} instead")
+    why = _dir_usable(AUDIO_FALLBACK)
+    if why:
+        raise VerbatimError(f"cannot use {AUDIO_FALLBACK} for audio: {why}")
+    return AUDIO_FALLBACK, None
+
+
+def _pulse_sources() -> tuple[str, str]:
+    def pactl(*a):
+        return subprocess.run(["pactl", *a], capture_output=True,
+                              text=True, timeout=10).stdout.strip()
+    mic = os.environ.get("VERBATIM_AUDIO_MIC") or pactl("get-default-source")
+    mon = os.environ.get("VERBATIM_AUDIO_MONITOR")
+    if not mon:
+        sink = pactl("get-default-sink")
+        mon = f"{sink}.monitor" if sink else ""
+    if not mic and not mon:
+        raise VerbatimError("no PulseAudio/PipeWire sources found (is pactl working?)")
+    return mic, mon
+
+
+def audio_path_for(meeting_id: str) -> Path | None:
+    """Where a meeting's archived audio ended up, if we recorded any."""
+    try:
+        idx = json.loads((_VERBATIM_STATE / "audio-index.json")
+                         .read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    p = idx.get(meeting_id)
+    return Path(p) if p and Path(p).exists() else None
+
+
+def _remember_audio(meeting_id: str, path: Path) -> None:
+    f = _VERBATIM_STATE / "audio-index.json"
+    try:
+        idx = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        idx = {}
+    idx[meeting_id] = str(path)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(idx, indent=2) + "\n", encoding="utf-8")
+
+
+def start_audio_capture(title: str | None) -> tuple[Path, str | None]:
+    """Begin the archival recording. Returns (path, warning-or-None)."""
+    stop_audio_capture()  # never leave two ffmpegs fighting over the same sources
+    dest, warning = resolve_audio_dir()
+    mic, mon = _pulse_sources()
+    stamp = datetime.now().strftime("%Y-%m-%d %H%M")
+    path = dest / f"{stamp} - {_fs_safe(title or 'meeting')}.opus"
+
+    inputs, filt = [], ""
+    if mic and mon:
+        inputs = ["-f", "pulse", "-i", mic, "-f", "pulse", "-i", mon]
+        filt = "[0:a][1:a]amix=inputs=2:duration=longest:dropout_transition=0,aresample=16000[a]"
+    else:
+        inputs = ["-f", "pulse", "-i", mic or mon]
+        filt = "[0:a]aresample=16000[a]"
+
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs,
+           "-filter_complex", filt, "-map", "[a]", "-ac", "1",
+           "-c:a", "libopus", "-b:a", AUDIO_BITRATE, str(path)]
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            start_new_session=True)
+    time.sleep(1.2)
+    if proc.poll() is not None:
+        err = (proc.stderr.read() or b"").decode(errors="replace").strip()
+        raise VerbatimError(f"audio capture failed to start: {err[:300]}")
+    _CAPTURE_STATE.parent.mkdir(parents=True, exist_ok=True)
+    _CAPTURE_STATE.write_text(json.dumps({"pid": proc.pid, "path": str(path)}),
+                              encoding="utf-8")
+    return path, warning
+
+
+def stop_audio_capture(meeting_id: str | None = None) -> Path | None:
+    """Finalize the recording. Returns the path if a usable file was written."""
+    try:
+        st = json.loads(_CAPTURE_STATE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    pid, path = st.get("pid"), Path(st.get("path", ""))
+    if pid:
+        try:
+            # SIGINT, not SIGKILL: ffmpeg must flush and write the Ogg trailer,
+            # otherwise the file has no duration and some players reject it.
+            os.kill(pid, 2)
+            for _ in range(50):
+                time.sleep(0.1)
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+            else:
+                os.kill(pid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+    _CAPTURE_STATE.unlink(missing_ok=True)
+    if path.is_file() and path.stat().st_size > 1024:
+        if meeting_id:
+            _remember_audio(meeting_id, path)
+        return path
+    return None
+
+
+def spawn_overlay() -> None:
+    """Launch the floating recording overlay in its own process.
+
+    `python3 -m verbatim` only resolves when the checkout root is on sys.path.
+    The `verbatim` launcher inserts it into ITS OWN sys.path, but a child
+    process does not inherit sys.path — only PYTHONPATH. So spawning from the
+    systemd-launched tray (CWD=/) died with "No module named verbatim" and,
+    because output is discarded, showed nothing at all. Pass the root along.
+    """
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = f"{root}{os.pathsep}{existing}" if existing else str(root)
+    subprocess.Popen([sys.executable, "-m", "verbatim", "overlay"],
+                     start_new_session=True, env=env,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def _parakeet_section(text: str) -> tuple[int, int]:
@@ -754,6 +968,16 @@ def start_meeting(title: str | None = None, diarization: str | None = None,
     except Exception:
         exit_meeting_mode()  # don't strand the daemon out of dictation mode
         raise
+    # Archival audio runs alongside VoxType's own capture. Start it after the
+    # meeting is confirmed so a failed start doesn't leave an orphan ffmpeg.
+    try:
+        _, warn = start_audio_capture(title)
+        if warn:
+            print(f"verbatim: {warn}", file=sys.stderr)
+    except (VerbatimError, OSError) as e:
+        # Transcription is still running; say so rather than aborting the meeting.
+        print(f"verbatim: WARNING - no audio archive for this meeting: {e}",
+              file=sys.stderr)
     if not wait:
         return ""
     deadline = time.time() + wait_timeout
@@ -769,12 +993,18 @@ def start_meeting(title: str | None = None, diarization: str | None = None,
 
 
 def stop_meeting(settle_secs: int = 6) -> None:
+    mid = is_recording()
     try:
         _vox("meeting", "stop", timeout=30)
         # give the daemon a moment to finalize the last chunk + persist
         time.sleep(settle_secs)
     finally:
-        # Always hand dictation back its streaming config, even if stop failed.
+        # Always finalize the archive and hand dictation back its streaming
+        # config, even if the stop itself failed.
+        try:
+            stop_audio_capture(mid)
+        except OSError:
+            pass
         exit_meeting_mode()
 
 
@@ -830,7 +1060,7 @@ def analysis_section(meeting_id: str, engine: str | None = None) -> str:
         return f"_AI analysis unavailable: {e}_"
 
 
-def transcript_failure(m: "Meeting") -> str | None:
+def transcript_failure(m: "Meeting", transcript_body: str | None = None) -> str | None:
     """Detect a recording that captured audio but transcribed none of it.
 
     This is the generic alarm for the failure that silently destroyed four
@@ -838,19 +1068,23 @@ def transcript_failure(m: "Meeting") -> str | None:
     transcribe, and the note is written saying "No speech was captured" — which
     reads like a microphone problem rather than a broken pipeline.
 
-    Any cause produces the same signature: chunk_count > 0 and zero segments.
+    Any cause produces the same signature: chunks captured, transcript empty.
     Returns a human-readable diagnosis, or None when the meeting looks fine.
     Deliberately NOT raising: the note should still be written, just loudly.
+
+    `transcript_body` is the already-rendered body when the caller has one, so
+    building a note doesn't export twice. We go through the export rather than
+    reading VoxType's transcript.json — that file is its private format, and
+    this module's rule is to drive the stable CLI instead.
     """
     if not m.chunk_count:
         return None  # genuinely nothing captured (mic muted, instant stop)
     try:
-        seg_file = Path(m.storage_path) / "transcript.json" if m.storage_path else None
-        if not seg_file or not seg_file.is_file():
-            return None
-        if json.loads(seg_file.read_text(encoding="utf-8")).get("segments"):
-            return None
-    except (OSError, json.JSONDecodeError, ValueError):
+        body = (transcript_body if transcript_body is not None
+                else _transcript_body(display_transcript(m.id)))
+    except VerbatimError:
+        return None
+    if body.strip() and "_No speech was captured._" not in body:
         return None
 
     hint = ""
@@ -877,8 +1111,8 @@ def build_note(meeting_id: str, engine: str | None = None) -> tuple[Path, str]:
     if not m:
         raise VerbatimError(f"no meeting matching '{meeting_id}'")
 
-    failure = transcript_failure(m)
     transcript = _transcript_body(display_transcript(m.id))
+    failure = transcript_failure(m, transcript)
     intelligence = analysis_section(m.id, engine)
 
     labels = speaker_labels(m.id)
@@ -894,6 +1128,11 @@ def build_note(meeting_id: str, engine: str | None = None) -> tuple[Path, str]:
         parts.append(f"- **Participants:** {who}")
     if m.model:
         parts.append(f"- **Transcribed by:** {m.model}")
+    audio = audio_path_for(m.id)
+    if audio:
+        # The recording is the thing that makes a failed transcript survivable,
+        # so link it from the note rather than leaving it findable only by date.
+        parts.append(f"- **Audio:** [`{audio.name}`]({audio.as_uri()})")
     stats = speaker_stats(m.id)
     if stats:
         parts.append("- **Talk time:** "
