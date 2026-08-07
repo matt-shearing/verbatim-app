@@ -196,7 +196,7 @@ def _spawn_overlay() -> None:
 
 
 def cmd_identify(a) -> int:
-    print("🧠 Identifying speakers with Claude…", file=sys.stderr)
+    print(f"🧠 Identifying speakers ({core.LOCAL_MODEL if core.AI_ENGINE == 'local' else 'Claude'})…", file=sys.stderr)
     attr = core.identify_speakers(a.id, refresh=a.refresh, roster=a.who)
     from collections import Counter
     for name, n in Counter(attr.get("lines", {}).values()).most_common():
@@ -366,8 +366,25 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _heal_voxtype_mode() -> None:
+    """Undo a stranded meeting-mode config left by a crashed/killed run.
+
+    enter_meeting_mode() turns VoxType's streaming off so meeting mode works;
+    if the process dies before stop, dictation silently loses live-typing until
+    someone notices. Restore it whenever the marker outlives the recording.
+    """
+    try:
+        if core._MODE_MARKER.exists() and not core.is_recording():
+            if core.exit_meeting_mode():
+                print("↻ restored VoxType dictation (streaming) config",
+                      file=sys.stderr)
+    except Exception:
+        pass  # never block a command on housekeeping
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _heal_voxtype_mode()
     try:
         return args.func(args)
     except VerbatimError as e:

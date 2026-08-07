@@ -48,9 +48,130 @@ PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
+# ── VoxType streaming vs meeting mode ───────────────────────────────────────
+# VoxType has ONE global `[parakeet] streaming` flag, and the two modes need
+# opposite values:
+#
+#   streaming = true   dictation types live at the cursor (the reason it's on)
+#   streaming = false  REQUIRED by meeting mode, which calls `transcribe_timed`
+#                      for timestamped segments
+#
+# With streaming on, every meeting chunk fails with
+#   "transcribe_timed is not supported in streaming mode"
+# and the meeting is saved with ZERO segments. It is logged at ERROR but the
+# recording still reports success, so it looks fine until you open the note.
+# That silently destroyed every meeting from 2026-07-09 (when streaming was
+# switched on) to 2026-08-07, including a 118-minute one - and `retain_audio`
+# is plumbed but not implemented in 0.7.5, so there is no audio to recover.
+#
+# So Verbatim flips the daemon into a meeting-capable config for the duration
+# of a recording and restores the dictation config afterwards. The marker file
+# records the original values so an interrupted run self-heals on next use.
+VOXTYPE_CONFIG = Path(
+    os.environ.get("VOXTYPE_CONFIG", HOME / ".config/voxtype/config.toml")
+)
+VOXTYPE_UNIT = os.environ.get("VOXTYPE_UNIT", "voxtype.service")
+_MODE_MARKER = _VERBATIM_STATE / "voxtype-mode-override.json"
+# The cache-aware streaming model only works in streaming mode; meeting mode
+# needs the full-context offline model.
+MEETING_PARAKEET_MODEL = os.environ.get(
+    "VERBATIM_MEETING_PARAKEET_MODEL", "parakeet-tdt-0.6b-v3"
+)
+AUTO_MODE_SWITCH = os.environ.get("VERBATIM_AUTO_MODE_SWITCH", "1") != "0"
+
 
 class VerbatimError(RuntimeError):
     pass
+
+
+def _parakeet_section(text: str) -> tuple[int, int]:
+    """Return the (start, end) offsets of the [parakeet] table body.
+
+    Edits must be confined to this slice: `model` also exists under [whisper],
+    and a naive global substitution would rewrite the wrong engine's model.
+    """
+    m = re.search(r"^\[parakeet\][^\n]*\n", text, flags=re.M)
+    if not m:
+        raise VerbatimError(f"no [parakeet] section in {VOXTYPE_CONFIG}")
+    start = m.end()
+    nxt = re.search(r"^\[", text[start:], flags=re.M)
+    return start, (start + nxt.start() if nxt else len(text))
+
+
+def _read_parakeet(text: str) -> dict:
+    s, e = _parakeet_section(text)
+    body = text[s:e]
+    out = {}
+    for key, pat in (("streaming", r"^streaming\s*=\s*(\w+)"),
+                     ("model", r'^model\s*=\s*"([^"]*)"')):
+        m = re.search(pat, body, flags=re.M)
+        if m:
+            out[key] = m.group(1)
+    return out
+
+
+def _write_parakeet(streaming: bool, model: str | None) -> None:
+    text = VOXTYPE_CONFIG.read_text(encoding="utf-8")
+    s, e = _parakeet_section(text)
+    body = text[s:e]
+    body, n = re.subn(r"^streaming\s*=\s*\w+",
+                      f"streaming = {str(streaming).lower()}", body, count=1, flags=re.M)
+    if not n:
+        body = f"streaming = {str(streaming).lower()}\n" + body
+    if model:
+        body, n = re.subn(r'^model\s*=\s*"[^"]*"',
+                          f'model = "{model}"', body, count=1, flags=re.M)
+        if not n:
+            body = f'model = "{model}"\n' + body
+    VOXTYPE_CONFIG.write_text(text[:s] + body + text[e:], encoding="utf-8")
+
+
+def _restart_voxtype(settle: float = 6.0) -> None:
+    """Restart the daemon so it re-reads config. Meeting start/stop are file
+    triggers consumed by the RUNNING daemon, so the config must be live before
+    the trigger is written."""
+    r = subprocess.run(
+        ["systemctl", "--user", "restart", VOXTYPE_UNIT],
+        capture_output=True, text=True, timeout=60,
+    )
+    if r.returncode != 0:
+        raise VerbatimError(
+            f"could not restart {VOXTYPE_UNIT}: {r.stderr.strip() or 'unknown error'}"
+        )
+    # The daemon reloads the ASR model on boot; give it time before triggering.
+    time.sleep(settle)
+
+
+def enter_meeting_mode() -> bool:
+    """Switch VoxType to a meeting-capable config. Returns True if it changed."""
+    if not AUTO_MODE_SWITCH:
+        return False
+    text = VOXTYPE_CONFIG.read_text(encoding="utf-8")
+    cur = _read_parakeet(text)
+    if cur.get("streaming") != "true":
+        return False  # already meeting-capable; leave it alone
+    _MODE_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    _MODE_MARKER.write_text(json.dumps(cur), encoding="utf-8")
+    _write_parakeet(streaming=False, model=MEETING_PARAKEET_MODEL)
+    _restart_voxtype()
+    return True
+
+
+def exit_meeting_mode() -> bool:
+    """Restore the dictation (streaming) config saved by enter_meeting_mode()."""
+    if not _MODE_MARKER.exists():
+        return False
+    try:
+        prev = json.loads(_MODE_MARKER.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        prev = {"streaming": "true"}
+    _write_parakeet(
+        streaming=str(prev.get("streaming", "true")).lower() == "true",
+        model=prev.get("model"),
+    )
+    _MODE_MARKER.unlink(missing_ok=True)
+    _restart_voxtype()
+    return True
 
 
 # ── VoxType CLI plumbing ────────────────────────────────────────────────────
@@ -620,12 +741,19 @@ def start_meeting(title: str | None = None, diarization: str | None = None,
     VoxType loads the ASR model on start (~5s), so 'start' returns before the
     meeting is live; we poll status until it reports recording.
     """
+    # Must happen BEFORE the start trigger: meeting mode fails on every chunk
+    # if the daemon is running with streaming = true.
+    enter_meeting_mode()
     args = ["meeting", "start"]
     if title:
         args += ["--title", title]
     if diarization:
         args += ["--diarization", diarization]
-    _vox(*args, timeout=30)
+    try:
+        _vox(*args, timeout=30)
+    except Exception:
+        exit_meeting_mode()  # don't strand the daemon out of dictation mode
+        raise
     if not wait:
         return ""
     deadline = time.time() + wait_timeout
@@ -641,9 +769,13 @@ def start_meeting(title: str | None = None, diarization: str | None = None,
 
 
 def stop_meeting(settle_secs: int = 6) -> None:
-    _vox("meeting", "stop", timeout=30)
-    # give the daemon a moment to finalize the last chunk + persist
-    time.sleep(settle_secs)
+    try:
+        _vox("meeting", "stop", timeout=30)
+        # give the daemon a moment to finalize the last chunk + persist
+        time.sleep(settle_secs)
+    finally:
+        # Always hand dictation back its streaming config, even if stop failed.
+        exit_meeting_mode()
 
 
 # ── Saved notes (the Fireflies-style artifact) ──────────────────────────────
