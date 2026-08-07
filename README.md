@@ -39,7 +39,7 @@ follow-up email draft.
 OpenAI-compatible server (Ollama on the gpu-node GPU node, reached over an SSH
 tunnel), so **transcripts never leave the network**. See
 **[`docs/LOCAL-AI.md`](docs/LOCAL-AI.md)** for the architecture, model choice
-(`qwen3.5:9b` primary / `gemma4:12b` fallback) and configuration. The former
+(`gemma4:12b` primary, tested head-to-head) and configuration. The former
 cloud path via the Claude Code CLI is still available with `--claude` or
 `VERBATIM_AI_ENGINE=claude`. The analysis prompt lives in
 `verbatim/prompts/analysis.md` (edit to taste).
@@ -109,7 +109,7 @@ verbatim tray                    # system-tray icon + auto overlay (needs PySide
 ```
 
 Notes are written to `~/Meetings` (override with `VERBATIM_NOTES_DIR`). The
-local model defaults to `qwen3.5:9b` (override with `VERBATIM_LOCAL_MODEL`);
+local model defaults to `gemma4:12b` (override with `VERBATIM_LOCAL_MODEL`);
 the opt-in Claude model defaults to `sonnet` (`VERBATIM_CLAUDE_MODEL`).
 
 ## The GUI (`verbatim gui`)

@@ -24,20 +24,26 @@ verbatim (this box)                        gpu-node (RTX 4080 Laptop, 12GB)
 |-----|---------|---------|
 | `VERBATIM_AI_ENGINE` | `local` | `local` or `claude`. No silent fallback between them — if the transcript must stay local, it stays local. |
 | `VERBATIM_LOCAL_URL` | `http://127.0.0.1:11435` | Base URL of the OpenAI-compatible server (the SSH tunnel to gpu-node). Point at `http://gpu-node:11434` directly if the firewall port is opened. |
-| `VERBATIM_LOCAL_MODEL` | `qwen3.5:9b` | Model tag. `gemma4:12b` is the pulled fallback if Qwen's output disappoints. |
+| `VERBATIM_LOCAL_MODEL` | `gemma4:12b` | Model tag. `qwen3.5:9b` is also pulled as an alternative. |
 
-## Model choice (researched 2026-08)
+## Model choice (researched + tested 2026-08)
 
-Hardware target: gpu-node's RTX 4080 Laptop, **12 GB VRAM**.
+Hardware target: gpu-node's RTX 4080 Laptop, **12 GB VRAM**. Candidates were
+shortlisted by research (grok report, 2026-08-07), then decided by head-to-head
+testing on a constructed multi-speaker transcript with known ground truth:
 
-| Role | Model | Why |
-|------|-------|-----|
-| **Primary** | `qwen3.5:9b` (Q4_K_M, ~6.6 GB) | Best instruction-following + JSON at this size, 256K native context, leaves room for a 16–32k KV cache fully on-GPU, ~55–75 tok/s → an hour-long meeting analyzes in well under 2 minutes. |
-| **Fallback** | `gemma4:12b` (Q4_K_M, ~7.6 GB) | Slightly cleaner formatting, ~20–30 % slower, less KV headroom. |
+| Model | Analysis | Speaker attribution | Verdict |
+|-------|----------|--------------------|---------|
+| **`gemma4:12b`** (Q4_K_M, ~7.6 GB) | Clean, accurate, **17 s** | **Perfect** — split a merged "Remote" into the right 3 people, 11 s | **Default** |
+| `qwen3.5:9b` (thinking off) | Good, some mixed-up attributions | Wrong — lumped far-end lines into the recorder, leaked "Remote" | Pulled, not default |
+| `qwen3.5:9b` (thinking on) | — | 7 min / 23k tokens of rumination, no parseable JSON | Unusable here |
 
-Rejected: Phi-4 (16k context ceiling), Mistral Small 24B (doesn't fit 12 GB),
-Llama 3.1 8B (superseded on instruction-following/JSON). Full research notes:
-grok report from 2026-08-07 (see Foreman item TNC82T).
+The client disables thinking (`think: false` via Ollama's native API) — with a
+reasoning model left in thinking mode, a single pass burns minutes and
+thousands of tokens.
+
+Rejected at research stage: Phi-4 (16k context ceiling), Mistral Small 24B
+(doesn't fit 12 GB), Llama 3.1 8B (superseded on instruction-following/JSON).
 
 ## The pieces
 
