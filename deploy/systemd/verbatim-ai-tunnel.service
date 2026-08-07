@@ -1,5 +1,5 @@
 [Unit]
-Description=SSH tunnel to gpu-node Ollama for Verbatim local AI
+Description=SSH tunnel to the GPU node Ollama for Verbatim local AI
 After=network-online.target
 
 [Service]

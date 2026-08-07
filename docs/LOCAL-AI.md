@@ -8,27 +8,29 @@ exists but is opt-in (`--claude` or `VERBATIM_AI_ENGINE=claude`).
 ## Architecture
 
 ```
-verbatim (this box)                        gpu-node (RTX 4080 Laptop, 12GB)
+verbatim (this box)                        gpu-node (RTX 4080, 12GB)
 ┌──────────────────────┐   SSH tunnel      ┌───────────────────────────┐
 │ analyze()/identify() │ ────────────────▶ │ ollama serve (user unit)  │
 │ POST /v1/chat/...    │  127.0.0.1:11435  │ qwen3.5:9b / gemma4:12b   │
-└──────────────────────┘  → gpu-node:11434   └───────────────────────────┘
+└──────────────────────┘  → gpu-node:11434 └───────────────────────────┘
 ```
 
 - Any **OpenAI-compatible** server works (Ollama, llama.cpp server, vLLM).
 - The client is stdlib-only (`urllib`), keeping Verbatim's zero-pip-deps rule.
+- `gpu-node` is an `~/.ssh/config` host alias — define it on each box that
+  installs the tunnel unit, pointing at your GPU machine.
 
 ## Configuration (env vars)
 
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `VERBATIM_AI_ENGINE` | `local` | `local` or `claude`. No silent fallback between them — if the transcript must stay local, it stays local. |
-| `VERBATIM_LOCAL_URL` | `http://127.0.0.1:11435` | Base URL of the OpenAI-compatible server (the SSH tunnel to gpu-node). Point at `http://gpu-node:11434` directly if the firewall port is opened. |
+| `VERBATIM_LOCAL_URL` | `http://127.0.0.1:11435` | Base URL of the OpenAI-compatible server (the SSH tunnel to the GPU node). Point at `http://gpu-node:11434` directly if the firewall port is opened. |
 | `VERBATIM_LOCAL_MODEL` | `gemma4:12b` | Model tag. `qwen3.5:9b` is also pulled as an alternative. |
 
 ## Model choice (researched + tested 2026-08)
 
-Hardware target: gpu-node's RTX 4080 Laptop, **12 GB VRAM**. Candidates were
+Hardware target: the GPU node (RTX 4080 Laptop-class, **12 GB VRAM**). Candidates were
 shortlisted by research (grok report, 2026-08-07), then decided by head-to-head
 testing on a constructed multi-speaker transcript with known ground truth:
 
@@ -47,9 +49,9 @@ Rejected at research stage: Phi-4 (16k context ceiling), Mistral Small 24B
 
 ## The pieces
 
-### On gpu-node — `~/.config/systemd/user/ollama.service`
+### On the GPU node — `~/.config/systemd/user/ollama.service`
 
-User-level unit (no sudo on gpu-node), lingering enabled so it survives
+User-level unit (no sudo on the GPU node), lingering enabled so it survives
 logout/reboot. Key environment:
 
 ```
@@ -65,10 +67,10 @@ Manage it: `ssh gpu-node systemctl --user {status,restart} ollama`.
 ### On this box — `~/.config/systemd/user/verbatim-ai-tunnel.service`
 
 Persistent `ssh -N -L 127.0.0.1:11435 → gpu-node:11434` tunnel (auto-restart).
-GPU node's firewalld blocks 11434 from the LAN and there's no sudo there, so the
+The GPU node's firewall blocks 11434 from the LAN and there's no sudo there, so the
 tunnel is the transport; it's also encrypted, which direct LAN traffic isn't.
 
-To go direct instead (needs someone with sudo on gpu-node):
+To go direct instead (needs someone with sudo on the GPU node):
 
 ```bash
 sudo firewall-cmd --add-port=11434/tcp --permanent && sudo firewall-cmd --reload

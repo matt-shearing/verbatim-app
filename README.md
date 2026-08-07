@@ -36,7 +36,7 @@ action-item table, open questions/risks, notable quotes, and a ready-to-send
 follow-up email draft.
 
 **By default this runs on a local model on our own hardware** — an
-OpenAI-compatible server (Ollama on the gpu-node GPU node, reached over an SSH
+OpenAI-compatible server (Ollama on a GPU node on the LAN, reached over an SSH
 tunnel), so **transcripts never leave the network**. See
 **[`docs/LOCAL-AI.md`](docs/LOCAL-AI.md)** for the architecture, model choice
 (`gemma4:12b` primary, tested head-to-head) and configuration. The former
@@ -67,7 +67,7 @@ orchestrates external tools rather than embedding them. You need:
 | **Python 3.11+** | runs the CLI + GUI | stdlib only |
 | **[VoxType](https://voxtype.io)** with `[meeting]` mode enabled | audio capture, transcription, diarization | the engine Verbatim drives; runs as `voxtype.service` |
 | **PipeWire** (`parec`) | system-audio loopback capture | VoxType uses it |
-| **Local AI server** (Ollama on gpu-node) | AI analysis + speaker identification | OpenAI-compatible endpoint; see [`docs/LOCAL-AI.md`](docs/LOCAL-AI.md) |
+| **Local AI server** (Ollama on the GPU node) | AI analysis + speaker identification | OpenAI-compatible endpoint; see [`docs/LOCAL-AI.md`](docs/LOCAL-AI.md) |
 | **[Claude Code CLI](https://claude.com/claude-code)** (`claude`) (optional) | cloud AI path via `--claude` | only if you opt out of local processing |
 | **PySide6** (optional) | the desktop overlay + tray icon | `pip install PySide6`; not needed for the CLI or web UI |
 | GPU transcription (optional) | ~15× real-time | ONNX; MIGraphX on AMD ROCm here, CPU otherwise |

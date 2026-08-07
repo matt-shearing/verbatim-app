@@ -1,4 +1,4 @@
-# Installed on the GPU node (gpu-node) as ~/.config/systemd/user/ollama.service
+# Installed on the GPU node as ~/.config/systemd/user/ollama.service
 # (user-level: no sudo there). Enable lingering so it survives logout/reboot:
 #   systemctl --user daemon-reload && systemctl --user enable --now ollama
 #   loginctl enable-linger "$USER"
