@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Verbatim">
+  <title>Verbatim</title>
+  <defs>
+    <linearGradient id="vb-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b303b"/>
+      <stop offset="1" stop-color="#1b1f27"/>
+    </linearGradient>
+    <linearGradient id="vb-mic" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7fa1"/>
+      <stop offset="1" stop-color="#e0577b"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#vb-bg)"/>
+
+  <!-- microphone capsule -->
+  <rect x="26" y="13" width="12" height="23" rx="6" fill="url(#vb-mic)"/>
+
+  <!-- cradle + stand -->
+  <path d="M20 30a12 12 0 0 0 24 0" fill="none" stroke="#e6e9ef"
+        stroke-width="3.5" stroke-linecap="round"/>
+  <line x1="32" y1="42" x2="32" y2="48" stroke="#e6e9ef"
+        stroke-width="3.5" stroke-linecap="round"/>
+
+  <!-- transcript lines: the "verbatim" half of the mark -->
+  <g stroke="#8a929e" stroke-width="3" stroke-linecap="round">
+    <line x1="21" y1="53" x2="43" y2="53"/>
+    <line x1="25" y1="53" x2="25" y2="53" stroke="#e0577b"/>
+  </g>
+</svg>

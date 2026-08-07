@@ -21,6 +21,11 @@ from . import core
 _POS_FILE = core._VERBATIM_STATE / "overlay_pos.json"
 _LOCK_FILE = core._VERBATIM_STATE / "overlay.lock"
 
+# Same reason as tray.py: Qt's xcb fallback segfaults under this Wayland
+# session, so pin the platform before PySide6 initialises it.
+if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("QT_QPA_PLATFORM"):
+    os.environ["QT_QPA_PLATFORM"] = "wayland;xcb"
+
 try:
     from PySide6 import QtCore, QtGui, QtWidgets
     _HAVE_QT = True

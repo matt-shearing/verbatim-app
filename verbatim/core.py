@@ -830,12 +830,54 @@ def analysis_section(meeting_id: str, engine: str | None = None) -> str:
         return f"_AI analysis unavailable: {e}_"
 
 
+def transcript_failure(m: "Meeting") -> str | None:
+    """Detect a recording that captured audio but transcribed none of it.
+
+    This is the generic alarm for the failure that silently destroyed four
+    meetings (see enter_meeting_mode): chunks are captured, every one fails to
+    transcribe, and the note is written saying "No speech was captured" — which
+    reads like a microphone problem rather than a broken pipeline.
+
+    Any cause produces the same signature: chunk_count > 0 and zero segments.
+    Returns a human-readable diagnosis, or None when the meeting looks fine.
+    Deliberately NOT raising: the note should still be written, just loudly.
+    """
+    if not m.chunk_count:
+        return None  # genuinely nothing captured (mic muted, instant stop)
+    try:
+        seg_file = Path(m.storage_path) / "transcript.json" if m.storage_path else None
+        if not seg_file or not seg_file.is_file():
+            return None
+        if json.loads(seg_file.read_text(encoding="utf-8")).get("segments"):
+            return None
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+
+    hint = ""
+    try:
+        cur = _read_parakeet(VOXTYPE_CONFIG.read_text(encoding="utf-8"))
+        if cur.get("streaming") == "true":
+            hint = ("\n  Likely cause: [parakeet] streaming = true, which makes "
+                    "meeting mode reject every chunk.\n  Verbatim normally "
+                    "switches this automatically — if you started the meeting "
+                    "from a long-running\n  process (the web GUI or tray), "
+                    "restart it so it picks up the current code:\n"
+                    "    systemctl --user restart verbatim.service")
+    except (OSError, VerbatimError):
+        pass
+    return (f"{m.chunk_count} audio chunks were captured but NONE were "
+            f"transcribed — this recording has no content.{hint}\n"
+            f"  Check: journalctl --user -u voxtype.service --since "
+            f"'{m.started_dt:%Y-%m-%d %H:%M}' | grep -i error")
+
+
 def build_note(meeting_id: str, engine: str | None = None) -> tuple[Path, str]:
     """Assemble a complete meeting note and write it to NOTES_DIR."""
     m = get_meeting(meeting_id)
     if not m:
         raise VerbatimError(f"no meeting matching '{meeting_id}'")
 
+    failure = transcript_failure(m)
     transcript = _transcript_body(display_transcript(m.id))
     intelligence = analysis_section(m.id, engine)
 
@@ -856,6 +898,11 @@ def build_note(meeting_id: str, engine: str | None = None) -> tuple[Path, str]:
     if stats:
         parts.append("- **Talk time:** "
                      + ", ".join(f"{_fmt_speaker(s)} {s['pct']}%" for s in stats[:6]))
+    if failure:
+        # Put it at the top of the note too, so a broken recording is obvious
+        # when the file is opened weeks later, not just in the terminal.
+        parts += ["", "> [!WARNING] **This recording failed to transcribe.**",
+                  "> " + failure.replace("\n", "\n> ")]
     if intelligence:
         parts += ["", intelligence]
     parts += ["", "---", "", "## Full Transcript", "", transcript, ""]

@@ -530,9 +530,13 @@ class Handler(BaseHTTPRequestHandler):
                 if core.is_recording():
                     core.stop_meeting()
                 m = core.get_meeting("latest")
+                failure = None
                 if m:
                     core.build_note(m.id, engine="none")  # fast finalize
-                return self._json({"id": m.id if m else None})
+                    # Audio captured but nothing transcribed - the UI must say so.
+                    failure = core.transcript_failure(m)
+                return self._json({"id": m.id if m else None,
+                                   "failed": bool(failure), "failure": failure})
             if p.startswith("/api/meeting/"):
                 parts = p.split("/")
                 mid, action = parts[3], parts[4]

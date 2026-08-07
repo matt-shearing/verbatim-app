@@ -79,7 +79,17 @@ def cmd_stop(a) -> int:
     except VerbatimError as e:
         return _err(str(e))
     print(f"✓ Saved note: {path}")
-    _notify("Meeting note ready", str(path))
+
+    # A recording that captured audio but transcribed none of it used to pass
+    # silently as "No speech was captured". Make it impossible to miss.
+    m = core.get_meeting(target)
+    failure = core.transcript_failure(m) if m else None
+    if failure:
+        print(f"\n⚠  RECORDING FAILED — {failure}", file=sys.stderr)
+        _notify("⚠ Verbatim: recording failed",
+                "Audio was captured but nothing was transcribed.")
+    else:
+        _notify("Meeting note ready", str(path))
     if not a.no_open:
         _open_file(str(path))
     return 0
