@@ -14,6 +14,8 @@ Reusable pieces for running Verbatim persistently. Full walkthrough in
 | `systemd/verbatim-autocommit.service` | Oneshot runner for the auto-commit |
 | `systemd/verbatim-autocommit.timer` | Periodic auto-commit (every 20 min) |
 | `verbatim-tray.desktop` | XDG autostart entry for the tray icon (needs PySide6) |
+| `systemd/verbatim-ai-tunnel.service` | SSH tunnel `127.0.0.1:11435 → gpu-node:11434` for the local AI engine (install on the box running Verbatim; see `../docs/LOCAL-AI.md`) |
+| `systemd/ollama-gpu-node.service` | Ollama server user-unit for the gpu-node GPU node (install there as `ollama.service`) |
 
 ## Quick install
 

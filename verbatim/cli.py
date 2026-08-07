@@ -46,9 +46,18 @@ def cmd_start(a) -> int:
 def _engine(a) -> str:
     if getattr(a, "no_ai", False):
         return "none"
+    if getattr(a, "claude", False):
+        return "claude"
     if getattr(a, "local", False):
-        return "ollama"
-    return "claude"
+        return "local"
+    return core.AI_ENGINE
+
+
+def _engine_label(engine: str) -> str:
+    return {"local": f"local AI analysis ({core.LOCAL_MODEL})",
+            "claude": "Claude AI analysis",
+            "ollama": "basic local summary",
+            "none": "transcript only"}[engine]
 
 
 def cmd_stop(a) -> int:
@@ -62,9 +71,7 @@ def cmd_stop(a) -> int:
     engine = _engine(a)
     _notify("Recording stopped", "Transcribing & analyzing…")
     target = mid or "latest"
-    label = {"claude": "Claude AI analysis", "ollama": "local summary",
-             "none": "transcript only"}[engine]
-    print(f"  Building note ({label})…")
+    print(f"  Building note ({_engine_label(engine)})…")
     try:
         path, _ = core.build_note(target, engine=engine)
     except VerbatimError as e:
@@ -108,10 +115,11 @@ def cmd_show(a) -> int:
 
 
 def cmd_ai(a) -> int:
-    """Fireflies-style analysis via Claude Code (or --local Ollama summary)."""
-    print("✨ Analyzing with " + ("Ollama…" if a.local else "Claude…"),
-          file=sys.stderr)
-    text = core.summarize(a.id) if a.local else core.analyze(a.id)
+    """Fireflies-style analysis via the configured AI engine."""
+    engine = "ollama" if getattr(a, "ollama_summary", False) else _engine(a)
+    print(f"✨ Analyzing ({_engine_label(engine)})…", file=sys.stderr)
+    text = (core.summarize(a.id) if engine == "ollama"
+            else core.analyze(a.id, engine=engine))
     print(text)
     return 0
 
@@ -121,9 +129,9 @@ def cmd_summary(a) -> int:  # kept as an alias of `ai`
 
 
 def cmd_note(a) -> int:
-    print(f"  Building note ({'local summary' if a.local else 'Claude AI'})…",
-          file=sys.stderr)
-    path, _ = core.build_note(a.id, engine=_engine(a))
+    engine = _engine(a)
+    print(f"  Building note ({_engine_label(engine)})…", file=sys.stderr)
+    path, _ = core.build_note(a.id, engine=engine)
     print(f"✓ Saved note: {path}")
     if not a.no_open:
         _open_file(str(path))
@@ -257,7 +265,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     def _ai_flags(sp):
         sp.add_argument("--local", action="store_true",
-                        help="use offline Ollama summary instead of Claude")
+                        help="force the local AI engine (the default unless "
+                             "VERBATIM_AI_ENGINE=claude)")
+        sp.add_argument("--claude", action="store_true",
+                        help="force cloud analysis via the Claude Code CLI")
         sp.add_argument("--no-ai", action="store_true",
                         help="transcript only, no AI analysis")
 
@@ -283,15 +294,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id", help="meeting id, short id, or 'latest'")
     s.set_defaults(func=cmd_show)
 
-    s = sub.add_parser("ai", help="Fireflies-style analysis via Claude (print)")
+    s = sub.add_parser("ai", help="Fireflies-style analysis (local AI by default)")
     s.add_argument("id", help="meeting id, short id, or 'latest'")
-    s.add_argument("--local", action="store_true",
-                   help="use offline Ollama summary instead of Claude")
+    _ai_flags(s)
+    s.add_argument("--ollama-summary", dest="ollama_summary", action="store_true",
+                   help="VoxType's basic built-in Ollama summary instead")
     s.set_defaults(func=cmd_ai)
 
     s = sub.add_parser("summary", help="alias of `ai`")
     s.add_argument("id")
-    s.add_argument("--local", action="store_true")
+    _ai_flags(s)
+    s.add_argument("--ollama-summary", dest="ollama_summary", action="store_true")
     s.set_defaults(func=cmd_summary)
 
     s = sub.add_parser("note", help="(re)build the saved markdown note")

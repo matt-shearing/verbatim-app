@@ -247,7 +247,7 @@ async function openMeeting(id){
     <div class="chips">${chips||''}</div>
     ${tt}
     <div class="bar">
-      <button id="sum" class="primary">✨ ${m.analyzed?'Re-analyze':'Analyze with Claude'}</button>
+      <button id="sum" class="primary">✨ ${m.analyzed?'Re-analyze':'Analyze (AI)'}</button>
       <button id="copy">⧉ Copy summary</button>
       <button id="exp">⬇ Summary .md</button>
       <button id="ident">🧠 Identify speakers (AI)</button>
@@ -270,8 +270,8 @@ async function openMeeting(id){
   }else{
     pane.className='md';
     pane.innerHTML=analysis?mdToHtml(analysis):
-      `<div class="empty">No AI summary yet.<br><button class="primary" onclick="doAnalyze()">✨ Analyze with Claude</button>
-       <div class="meta" style="margin-top:8px">~1 min · runs locally via Claude Code, no cloud model server</div></div>`;
+      `<div class="empty">No AI summary yet.<br><button class="primary" onclick="doAnalyze()">✨ Analyze (AI)</button>
+       <div class="meta" style="margin-top:8px">~1–2 min · runs on our own hardware (local model) — nothing leaves the network</div></div>`;
   }
   $('#sum').onclick=doAnalyze;
   $('#ident').onclick=doIdentify;
@@ -347,7 +347,7 @@ async function doIdentify(){
   const id=cur; tab='transcript'; await openMeeting(id);
   const pane=$('#pane');
   const banner=document.createElement('div'); banner.className='ident-banner';
-  banner.innerHTML='<span class="spin"></span> Claude is identifying who each speaker is… (~1–2 min for long meetings; safe to come back later)';
+  banner.innerHTML='<span class="spin"></span> The AI is identifying who each speaker is… (~1–2 min for long meetings; safe to come back later)';
   pane.prepend(banner);
   await fetch('/api/meeting/'+id+'/identify',{method:'POST',body:JSON.stringify({who})});
   const poll=async()=>{if(cur!==id)return;
@@ -543,7 +543,7 @@ class Handler(BaseHTTPRequestHandler):
                     _start_job(m.id, "analysis",
                                lambda i: core.analyze(i, refresh=True))
                     return self._json({"status": "started"})
-                if action == "identify":  # async speaker attribution via Claude
+                if action == "identify":  # async speaker attribution via the AI engine
                     m = core.get_meeting(mid)
                     if not m:
                         return self._json({"error": "not found"}, 404)

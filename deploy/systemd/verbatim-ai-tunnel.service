@@ -1,0 +1,11 @@
+[Unit]
+Description=SSH tunnel to gpu-node Ollama for Verbatim local AI
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ssh -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -L 127.0.0.1:11435:127.0.0.1:11434 gpu-node
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

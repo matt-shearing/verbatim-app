@@ -34,6 +34,13 @@ ATTRIB_DIR = _VERBATIM_STATE / "attribution"
 VOXTYPE_BIN = os.environ.get("VOXTYPE_BIN", "voxtype")
 CLAUDE_BIN = os.environ.get("VERBATIM_CLAUDE_BIN", "claude")
 CLAUDE_MODEL = os.environ.get("VERBATIM_CLAUDE_MODEL", "sonnet")
+# AI engine: "local" (an OpenAI-compatible server on this machine or the LAN —
+# nothing leaves the network) or "claude" (Claude Code CLI, cloud).
+AI_ENGINE = os.environ.get("VERBATIM_AI_ENGINE", "local")
+# Default is the SSH tunnel to gpu-node (verbatim-ai-tunnel.service); point this
+# straight at a LAN host (e.g. http://gpu-node:11434) if its firewall allows.
+LOCAL_URL = os.environ.get("VERBATIM_LOCAL_URL", "http://127.0.0.1:11435").rstrip("/")
+LOCAL_MODEL = os.environ.get("VERBATIM_LOCAL_MODEL", "qwen3.5:9b")
 PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -60,6 +67,101 @@ def _vox(*args: str, timeout: int | None = 300) -> str:
         err = _ANSI.sub("", proc.stderr).strip() or out or "unknown error"
         raise VerbatimError(err.splitlines()[-1] if err else "voxtype failed")
     return out
+
+
+# ── LLM plumbing (local server or Claude CLI) ───────────────────────────────
+def _llm_post(url: str, payload: dict, timeout: int) -> dict:
+    import urllib.request
+    import urllib.error
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise
+        detail = ""
+        try:
+            detail = json.loads(e.read().decode("utf-8"))["error"]["message"]
+        except Exception:
+            pass
+        raise VerbatimError(
+            f"local AI server error ({e.code}): {detail or e.reason} — "
+            f"is model '{LOCAL_MODEL}' pulled? (ollama pull {LOCAL_MODEL})")
+    except urllib.error.URLError as e:
+        raise VerbatimError(
+            f"local AI server unreachable at {LOCAL_URL} ({e.reason}) — "
+            "start it (see docs/LOCAL-AI.md) or set VERBATIM_AI_ENGINE=claude")
+    except TimeoutError:
+        raise VerbatimError(f"local AI analysis timed out after {timeout}s")
+
+
+def _llm_local(prompt: str, timeout: int = 600) -> str:
+    """Run the prompt against the local model server at LOCAL_URL. Prefers
+    Ollama's native /api/chat (so reasoning models can have thinking disabled —
+    with it on, a meeting pass burns minutes and thousands of tokens musing);
+    falls back to OpenAI-compatible /v1/chat/completions for llama.cpp, vLLM
+    and friends. Stdlib only — no pip deps."""
+    import urllib.error
+    msgs = [{"role": "user", "content": prompt}]
+    try:
+        data = _llm_post(f"{LOCAL_URL}/api/chat", {
+            "model": LOCAL_MODEL, "messages": msgs, "think": False,
+            "stream": False, "options": {"temperature": 0.2},
+        }, timeout)
+        out = (data.get("message") or {}).get("content", "")
+    except urllib.error.HTTPError:
+        data = _llm_post(f"{LOCAL_URL}/v1/chat/completions", {
+            "model": LOCAL_MODEL, "messages": msgs,
+            "temperature": 0.2, "stream": False,
+        }, timeout)
+        try:
+            out = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            raise VerbatimError(
+                f"unexpected response from local AI server: {str(data)[:200]}")
+    # Strip a reasoning-model <think> block if the server left one inline.
+    out = re.sub(r"^\s*<think>.*?</think>\s*", "", out or "", flags=re.S)
+    if not out.strip():
+        raise VerbatimError("local AI model returned empty output")
+    return out.strip()
+
+
+def _llm_claude(prompt: str, timeout: int = 600, model: str | None = None) -> str:
+    """Run the prompt through the Claude Code CLI headless (cloud)."""
+    if not shutil.which(CLAUDE_BIN):
+        raise VerbatimError(f"'{CLAUDE_BIN}' (Claude Code CLI) not found")
+    try:
+        proc = subprocess.run(
+            [CLAUDE_BIN, "-p", "--model", model or CLAUDE_MODEL],
+            input=prompt, capture_output=True, text=True, timeout=timeout,
+            # Neutral cwd so Claude doesn't load a project's context/tools.
+            cwd=str(NOTES_DIR if NOTES_DIR.exists() else Path.home()),
+        )
+    except FileNotFoundError:
+        raise VerbatimError(f"'{CLAUDE_BIN}' not found on PATH")
+    except subprocess.TimeoutExpired:
+        raise VerbatimError(f"Claude analysis timed out after {timeout}s")
+    out = proc.stdout.strip()
+    if proc.returncode != 0 or not out:
+        err = (proc.stderr or "").strip() or "Claude returned no output"
+        raise VerbatimError(err.splitlines()[-1])
+    return out
+
+
+def run_llm(prompt: str, timeout: int = 600, engine: str | None = None,
+            model: str | None = None) -> str:
+    """Dispatch a prompt to the configured AI engine. There is deliberately no
+    silent fallback from local to cloud — if the transcript must stay on the
+    network, it stays on the network."""
+    eng = engine or AI_ENGINE
+    if eng == "local":
+        return _llm_local(prompt, timeout=timeout)
+    if eng == "claude":
+        return _llm_claude(prompt, timeout=timeout, model=model)
+    raise VerbatimError(f"unknown AI engine '{eng}' (use 'local' or 'claude')")
 
 
 # ── Meeting metadata (read-only DB access) ──────────────────────────────────
@@ -317,8 +419,6 @@ def identify_speakers(meeting_id: str, refresh: bool = False,
         existing = get_attribution(m.id)
         if existing.get("lines"):
             return existing
-    if not shutil.which(CLAUDE_BIN):
-        raise VerbatimError(f"'{CLAUDE_BIN}' (Claude Code CLI) not found")
 
     utts = utterances(m.id)
     if not utts:
@@ -338,20 +438,11 @@ def identify_speakers(meeting_id: str, refresh: bool = False,
                   "from conversational context.\n\n" + prompt
             )
 
-    try:
-        proc = subprocess.run(
-            [CLAUDE_BIN, "-p", "--model", CLAUDE_MODEL],
-            input=prompt, capture_output=True, text=True, timeout=900,
-            cwd=str(NOTES_DIR if NOTES_DIR.exists() else Path.home()),
-        )
-    except subprocess.TimeoutExpired:
-        raise VerbatimError("speaker identification timed out")
-    if proc.returncode != 0 or not proc.stdout.strip():
-        raise VerbatimError((proc.stderr or "Claude returned no output").splitlines()[-1])
+    out = run_llm(prompt, timeout=900)
 
-    data = _extract_json(proc.stdout)
+    data = _extract_json(out)
     if not isinstance(data, dict) or "segments" not in data:
-        raise VerbatimError("could not parse speaker attribution from Claude")
+        raise VerbatimError("could not parse speaker attribution from the AI model")
     # Expand compact runs into a per-utterance map (prompt is 1-based → 0-based).
     lines: dict[str, str] = {}
     for seg in data.get("segments", []):
@@ -363,7 +454,7 @@ def identify_speakers(meeting_id: str, refresh: bool = False,
         for i in range(max(a, 0), min(b, len(utts) - 1) + 1):
             lines[str(i)] = name
     if not lines:
-        raise VerbatimError("Claude returned no usable speaker segments")
+        raise VerbatimError("the AI model returned no usable speaker segments")
     attribution = {"lines": lines, "roster": data.get("roster", [])}
     save_attribution(m.id, attribution)
     return attribution
@@ -456,13 +547,13 @@ def get_cached_analysis(meeting_id: str) -> str | None:
 
 
 def analyze(meeting_id: str, model: str | None = None, timeout: int = 600,
-            refresh: bool = False) -> str:
-    """Rich 'Fireflies-style' analysis via the Claude Code CLI.
+            refresh: bool = False, engine: str | None = None) -> str:
+    """Rich 'Fireflies-style' analysis via the configured AI engine.
 
-    Runs `claude -p` headless with the transcript on stdin. Uses no local model
-    (unlike summarize()), so it's light on RAM — the fix for machines where the
-    18 GB Ollama model thrashes swap. Results are cached per meeting; pass
-    refresh=True to regenerate.
+    Default engine is 'local' (an OpenAI-compatible server on this machine or
+    the LAN — the transcript never leaves the network). 'claude' uses the
+    Claude Code CLI instead. Results are cached per meeting; pass refresh=True
+    to regenerate.
     """
     m = get_meeting(meeting_id)
     if not m:
@@ -471,10 +562,6 @@ def analyze(meeting_id: str, model: str | None = None, timeout: int = 600,
         cached = analysis_cache_path(m.id)
         if cached.exists():
             return cached.read_text(encoding="utf-8")
-    if not shutil.which(CLAUDE_BIN):
-        raise VerbatimError(
-            f"'{CLAUDE_BIN}' (Claude Code CLI) not found — install it or use "
-            "`--local` for the offline Ollama summary")
     transcript = display_transcript(m.id)
     if not _transcript_body(transcript).strip("_ \n") or \
             _transcript_body(transcript).startswith("_No speech"):
@@ -486,21 +573,7 @@ def analyze(meeting_id: str, model: str | None = None, timeout: int = 600,
            f"Duration: {m.duration_human}")
     prompt = tmpl.replace("{{CONTEXT}}", ctx).replace("{{TRANSCRIPT}}", transcript)
 
-    # Run in a neutral cwd so Claude doesn't load this project's context/tools.
-    try:
-        proc = subprocess.run(
-            [CLAUDE_BIN, "-p", "--model", model or CLAUDE_MODEL],
-            input=prompt, capture_output=True, text=True,
-            timeout=timeout, cwd=str(NOTES_DIR if NOTES_DIR.exists() else Path.home()),
-        )
-    except FileNotFoundError:
-        raise VerbatimError(f"'{CLAUDE_BIN}' not found on PATH")
-    except subprocess.TimeoutExpired:
-        raise VerbatimError(f"Claude analysis timed out after {timeout}s")
-    out = proc.stdout.strip()
-    if proc.returncode != 0 or not out:
-        err = (proc.stderr or "").strip() or "Claude returned no output"
-        raise VerbatimError(err.splitlines()[-1])
+    out = run_llm(prompt, timeout=timeout, engine=engine, model=model)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     analysis_cache_path(m.id).write_text(out, encoding="utf-8")
     return out
@@ -604,23 +677,25 @@ def _transcript_body(export_md: str) -> str:
     return body or "_No speech was captured._"
 
 
-def analysis_section(meeting_id: str, engine: str = "claude") -> str:
+def analysis_section(meeting_id: str, engine: str | None = None) -> str:
     """Return the Markdown 'intelligence' section for a note.
 
-    engine: 'claude' (Claude Code CLI, rich, no local RAM), 'ollama' (VoxType's
-    local summary), or 'none'.
+    engine: 'local' (rich analysis via the local AI server), 'claude' (Claude
+    Code CLI, cloud), 'ollama' (VoxType's basic built-in summary), 'none', or
+    None to use the configured default (AI_ENGINE).
     """
+    engine = engine or AI_ENGINE
     if engine == "none":
         return ""
     try:
         if engine == "ollama":
             return summarize(meeting_id)
-        return analyze(meeting_id)  # claude
+        return analyze(meeting_id, engine=engine)  # local | claude
     except VerbatimError as e:
         return f"_AI analysis unavailable: {e}_"
 
 
-def build_note(meeting_id: str, engine: str = "claude") -> tuple[Path, str]:
+def build_note(meeting_id: str, engine: str | None = None) -> tuple[Path, str]:
     """Assemble a complete meeting note and write it to NOTES_DIR."""
     m = get_meeting(meeting_id)
     if not m:

@@ -29,15 +29,20 @@ localhost browser GUI to name, browse, search, analyze, and label speakers.
 
 ### AI analysis (the "Fireflies brain")
 
-The `stop`/`note`/`ai` commands run a **Claude Code** pass over the transcript
-that produces a TL;DR, participant identification (real names inferred from
+The `stop`/`note`/`ai` commands run an AI pass over the transcript that
+produces a TL;DR, participant identification (real names inferred from
 context), topic-grouped notes with timestamps, decisions, an owner-attributed
 action-item table, open questions/risks, notable quotes, and a ready-to-send
-follow-up email draft. It uses the `claude` CLI headless (`claude -p`) — **no
-local model, no RAM cost** — which is why it replaced the old 18 GB Ollama
-summary that thrashed swap on this box. Ollama is still available offline via
-`--local`. The analysis prompt lives in `verbatim/prompts/analysis.md` (edit to
-taste).
+follow-up email draft.
+
+**By default this runs on a local model on our own hardware** — an
+OpenAI-compatible server (Ollama on the gpu-node GPU node, reached over an SSH
+tunnel), so **transcripts never leave the network**. See
+**[`docs/LOCAL-AI.md`](docs/LOCAL-AI.md)** for the architecture, model choice
+(`qwen3.5:9b` primary / `gemma4:12b` fallback) and configuration. The former
+cloud path via the Claude Code CLI is still available with `--claude` or
+`VERBATIM_AI_ENGINE=claude`. The analysis prompt lives in
+`verbatim/prompts/analysis.md` (edit to taste).
 
 ```
 ┌────────────┐   mic + system loopback   ┌───────────────┐   markdown note
@@ -62,8 +67,8 @@ orchestrates external tools rather than embedding them. You need:
 | **Python 3.11+** | runs the CLI + GUI | stdlib only |
 | **[VoxType](https://voxtype.io)** with `[meeting]` mode enabled | audio capture, transcription, diarization | the engine Verbatim drives; runs as `voxtype.service` |
 | **PipeWire** (`parec`) | system-audio loopback capture | VoxType uses it |
-| **[Claude Code CLI](https://claude.com/claude-code)** (`claude`) | AI analysis + speaker identification | must be on `PATH` and authenticated; used headless (`claude -p`) |
-| **Ollama** (optional) | offline summaries via `--local` | only if you want a no-cloud path |
+| **Local AI server** (Ollama on gpu-node) | AI analysis + speaker identification | OpenAI-compatible endpoint; see [`docs/LOCAL-AI.md`](docs/LOCAL-AI.md) |
+| **[Claude Code CLI](https://claude.com/claude-code)** (`claude`) (optional) | cloud AI path via `--claude` | only if you opt out of local processing |
 | **PySide6** (optional) | the desktop overlay + tray icon | `pip install PySide6`; not needed for the CLI or web UI |
 | GPU transcription (optional) | ~15× real-time | ONNX; MIGraphX on AMD ROCm here, CPU otherwise |
 
@@ -85,8 +90,8 @@ verbatim start "Weekly sync"     # begins recording (waits until capture is live
 verbatim stop                    # stop → transcribe → Claude analysis → save & open note
 verbatim toggle                  # start if idle, else stop+save  (bind to a hotkey)
 
-verbatim ai latest               # print Fireflies-style Claude analysis
-verbatim ai latest --local       # offline: use Ollama instead of Claude
+verbatim ai latest               # print Fireflies-style analysis (local model)
+verbatim ai latest --claude      # opt into cloud analysis via Claude Code
 verbatim list                    # past meetings
 verbatim show latest             # print a transcript
 verbatim label latest 1 "Alice"  # name a speaker
@@ -104,7 +109,8 @@ verbatim tray                    # system-tray icon + auto overlay (needs PySide
 ```
 
 Notes are written to `~/Meetings` (override with `VERBATIM_NOTES_DIR`). The
-Claude model defaults to `sonnet` (override with `VERBATIM_CLAUDE_MODEL`).
+local model defaults to `qwen3.5:9b` (override with `VERBATIM_LOCAL_MODEL`);
+the opt-in Claude model defaults to `sonnet` (`VERBATIM_CLAUDE_MODEL`).
 
 ## The GUI (`verbatim gui`)
 
@@ -186,8 +192,9 @@ Meeting behaviour lives in `~/.config/voxtype/config.toml` under `[meeting]`,
 - `[meeting.diarization] backend` — `"ml"` (default here; separates multiple
   speakers via ECAPA embeddings) or `"simple"` (You/Remote only, best for 1:1).
   The ECAPA model auto-downloads on the first `ml` meeting.
-- `[meeting.summary]` (Ollama) is now only used by `--local`. The default AI
-  path is Claude Code, which needs no local model.
+- `[meeting.summary]` (VoxType's own Ollama summary) is now only used by
+  `verbatim ai --ollama-summary`. The default AI path is Verbatim's own local
+  engine (see `docs/LOCAL-AI.md`).
 
 > ⚠️ **VoxType caches config at daemon startup.** After editing `config.toml`
 > run `systemctl --user restart voxtype.service`, or meeting mode won't see the
