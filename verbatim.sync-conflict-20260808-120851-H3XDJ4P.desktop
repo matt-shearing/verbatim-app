@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Verbatim
+GenericName=Meeting Notes
+Comment=Record, transcribe and summarize meetings locally
+Exec=@HERE@/bin/verbatim gui
+Icon=audio-input-microphone
+Terminal=false
+Categories=AudioVideo;Audio;Utility;
+Keywords=meeting;transcribe;notes;recording;fireflies;
