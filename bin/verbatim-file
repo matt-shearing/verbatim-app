@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Transcribe and summarise a recorded audio file entirely on this machine.
+
+For in-person meetings captured with a single microphone (no VoxType meeting
+mode, no remote side). Audio is split into chunks, each chunk is transcribed
+by VoxType (Parakeet on the GPU, VAD off so quiet speech is kept), and the
+timestamped transcript is summarised by the local llama-server (local-llm).
+Nothing is sent off the machine.
+
+    verbatim-file RECORDING.wav [--title "Board prep"] [--no-ai]
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+PROMPT = HERE / "verbatim" / "prompts" / "analysis.md"
+NOTES_DIR = Path(os.environ.get("VERBATIM_NOTES_DIR", Path.home() / "Meetings"))
+VOXTYPE_CONFIG = Path(os.environ.get(
+    "VERBATIM_FILE_VOXTYPE_CONFIG", Path.home() / ".config/verbatim/voxtype-meeting.toml"))
+ENGINE = os.environ.get("VERBATIM_FILE_ENGINE", "parakeet")
+CHUNK_SECONDS = int(os.environ.get("VERBATIM_FILE_CHUNK", "120"))
+LLM_URL = os.environ.get("VERBATIM_FILE_LLM_URL", "http://127.0.0.1:8080").rstrip("/")
+
+LOG_LINE = re.compile(r"^(Loading audio|Audio format|Processing|VAD:|\d{4}-\d\d-\d\dT)")
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+ROOM_NOTE = (
+    "This recording is a single room microphone at an in-person meeting. The "
+    "transcript has NO speaker labels: do not invent speakers or attribute "
+    "lines to people unless a name is clearly stated in the conversation. "
+    "Timestamps are [hh:mm:ss] from the start of the recording.")
+
+
+def log(msg):
+    print(f"verbatim-file: {msg}", file=sys.stderr, flush=True)
+
+
+def stamp(seconds):
+    s = int(seconds)
+    return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+def duration(path):
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=nw=1:nk=1", str(path)],
+        capture_output=True, text=True, check=True).stdout
+    return float(out.strip())
+
+
+def transcribe_chunk(wav):
+    cmd = ["voxtype", "transcribe", "--engine", ENGINE, str(wav)]
+    if VOXTYPE_CONFIG.exists():
+        cmd[1:1] = ["-c", str(VOXTYPE_CONFIG)]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"voxtype failed on {wav.name}: {res.stderr[-400:]}")
+    lines = [ANSI.sub("", l).strip() for l in res.stdout.splitlines()]
+    return " ".join(l for l in lines if l and not LOG_LINE.match(l))
+
+
+def transcribe(audio, workdir):
+    total = duration(audio)
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(audio),
+         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+         "-f", "segment", "-segment_time", str(CHUNK_SECONDS),
+         str(workdir / "chunk-%04d.wav")], check=True)
+    chunks = sorted(workdir.glob("chunk-*.wav"))
+    lines = []
+    for i, chunk in enumerate(chunks):
+        log(f"transcribing {i + 1}/{len(chunks)} ({stamp(i * CHUNK_SECONDS)} of {stamp(total)})")
+        text = transcribe_chunk(chunk)
+        if text:
+            lines.append(f"[{stamp(i * CHUNK_SECONDS)}] {text}")
+        chunk.unlink()
+    return lines, total
+
+
+def llm_up():
+    try:
+        urllib.request.urlopen(f"{LLM_URL}/health", timeout=3)
+        return True
+    except Exception:
+        return False
+
+
+def summarise(transcript, context):
+    started = False
+    if not llm_up():
+        log("starting local-llm")
+        subprocess.run(["local-llm", "start"], check=True, stdin=subprocess.DEVNULL)
+        started = True
+        for _ in range(180):
+            if llm_up():
+                break
+            time.sleep(2)
+        else:
+            raise RuntimeError("local-llm did not come up on " + LLM_URL)
+    try:
+        prompt = (PROMPT.read_text()
+                  .replace("{{CONTEXT}}", context + "\n" + ROOM_NOTE)
+                  .replace("{{TRANSCRIPT}}", transcript))
+        body = json.dumps({
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 16000,
+        }).encode()
+        req = urllib.request.Request(f"{LLM_URL}/v1/chat/completions", data=body,
+                                     headers={"Content-Type": "application/json"})
+        log("summarising with the local model (several minutes for a long meeting)")
+        with urllib.request.urlopen(req, timeout=3600) as resp:
+            data = json.load(resp)
+        text = data["choices"][0]["message"].get("content") or ""
+        return re.sub(r"(?s)<think>.*?</think>", "", text).strip()
+    finally:
+        if started:
+            subprocess.run(["local-llm", "stop"], stdin=subprocess.DEVNULL)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("audio", type=Path)
+    ap.add_argument("--title", default="In-person meeting")
+    ap.add_argument("--no-ai", action="store_true", help="transcript only")
+    args = ap.parse_args()
+
+    os.umask(0o077)
+    when = dt.datetime.fromtimestamp(args.audio.stat().st_mtime)
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    note = NOTES_DIR / f"{when:%Y-%m-%d %H%M} - {args.title}.md"
+
+    tmp_root = os.environ.get("XDG_RUNTIME_DIR") or None
+    workdir = Path(tempfile.mkdtemp(prefix="verbatim-file-", dir=tmp_root))
+    try:
+        lines, total = transcribe(args.audio, workdir)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    transcript = "\n\n".join(lines)
+    header = (f"# {args.title}\n\n- Recorded: {when:%Y-%m-%d %H:%M}\n"
+              f"- Length: {stamp(total)}\n- Audio: `{args.audio}`\n"
+              f"- Processed locally (VoxType {ENGINE} + local-llm)\n")
+    body = f"## Transcript\n\n{transcript}\n"
+    note.write_text(f"{header}\n{body}")
+    log(f"transcript saved: {note} ({len(transcript.split())} words)")
+
+    if args.no_ai or not lines:
+        return
+    context = f"Title: {args.title}\nDate: {when:%Y-%m-%d %H:%M}\nLength: {stamp(total)}"
+    try:
+        summary = summarise(transcript, context)
+    except Exception as e:
+        log(f"summary failed, transcript is still saved: {e}")
+        sys.exit(1)
+    note.write_text(f"{header}\n{summary}\n\n---\n\n{body}")
+    log(f"summary added: {note}")
+
+
+if __name__ == "__main__":
+    main()
