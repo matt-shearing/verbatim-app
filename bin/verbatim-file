@@ -58,18 +58,24 @@ def duration(path):
     return float(out.strip())
 
 
-def transcribe_chunk(wav):
+def transcribe_chunk(wav, attempts=3):
     cmd = ["voxtype", "transcribe", "--engine", ENGINE, str(wav)]
     if VOXTYPE_CONFIG.exists():
         cmd[1:1] = ["-c", str(VOXTYPE_CONFIG)]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        raise RuntimeError(f"voxtype failed on {wav.name}: {res.stderr[-400:]}")
-    lines = [ANSI.sub("", l).strip() for l in res.stdout.splitlines()]
-    return " ".join(l for l in lines if l and not LOG_LINE.match(l))
+    for attempt in range(1, attempts + 1):
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0:
+            lines = [ANSI.sub("", l).strip() for l in res.stdout.splitlines()]
+            return " ".join(l for l in lines if l and not LOG_LINE.match(l))
+        # A suspend/resume can leave the GPU briefly unusable; wait and retry.
+        log(f"voxtype failed on {wav.name} (attempt {attempt}/{attempts}): {res.stderr[-200:].strip()}")
+        time.sleep(15 * attempt)
+    raise RuntimeError(f"voxtype failed on {wav.name} after {attempts} attempts")
 
 
-def transcribe(audio, workdir):
+def transcribe(audio, workdir, cache):
+    """Transcribe in chunks. Each chunk's text is kept in `cache` so a run
+    interrupted by a crash or suspend resumes where it stopped."""
     total = duration(audio)
     subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(audio),
@@ -77,10 +83,18 @@ def transcribe(audio, workdir):
          "-f", "segment", "-segment_time", str(CHUNK_SECONDS),
          str(workdir / "chunk-%04d.wav")], check=True)
     chunks = sorted(workdir.glob("chunk-*.wav"))
+    cache.mkdir(parents=True, exist_ok=True)
     lines = []
     for i, chunk in enumerate(chunks):
-        log(f"transcribing {i + 1}/{len(chunks)} ({stamp(i * CHUNK_SECONDS)} of {stamp(total)})")
-        text = transcribe_chunk(chunk)
+        done = cache / f"{chunk.stem}.txt"
+        if done.exists():
+            text = done.read_text()
+        else:
+            started = time.monotonic()
+            text = transcribe_chunk(chunk)
+            done.write_text(text)
+            log(f"transcribed {i + 1}/{len(chunks)} ({stamp(i * CHUNK_SECONDS)} of {stamp(total)}) "
+                f"in {time.monotonic() - started:.0f}s")
         if text:
             lines.append(f"[{stamp(i * CHUNK_SECONDS)}] {text}")
         chunk.unlink()
@@ -142,8 +156,9 @@ def main():
 
     tmp_root = os.environ.get("XDG_RUNTIME_DIR") or None
     workdir = Path(tempfile.mkdtemp(prefix="verbatim-file-", dir=tmp_root))
+    cache = args.audio.parent / f".{args.audio.stem}.{ENGINE}-{CHUNK_SECONDS}s"
     try:
-        lines, total = transcribe(args.audio, workdir)
+        lines, total = transcribe(args.audio, workdir, cache)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     transcript = "\n\n".join(lines)
@@ -152,6 +167,7 @@ def main():
               f"- Processed locally (VoxType {ENGINE} + local-llm)\n")
     body = f"## Transcript\n\n{transcript}\n"
     note.write_text(f"{header}\n{body}")
+    shutil.rmtree(cache, ignore_errors=True)
     log(f"transcript saved: {note} ({len(transcript.split())} words)")
 
     if args.no_ai or not lines:
