@@ -108,6 +108,21 @@ verbatim overlay                 # floating "recording" overlay (needs PySide6)
 verbatim tray                    # system-tray icon + auto overlay (needs PySide6)
 ```
 
+### In-person meetings (single mic, any machine)
+
+`bin/verbatim-file` turns any recording into a note without VoxType meeting
+mode: it chunks the audio, transcribes it with Parakeet (VAD off, spoken
+punctuation off, via `~/.config/verbatim/voxtype-meeting.toml`) and summarises
+it with the local `local-llm` server, starting and stopping it as needed.
+
+```bash
+pw-record --rate 16000 --channels 1 ~/Meetings/raw/meeting.wav   # Ctrl+C to stop
+bin/verbatim-file ~/Meetings/raw/meeting.wav --title "Board prep"
+```
+
+The transcript is saved before summarising starts, so a model failure never loses it.
+Notes are written with mode 600.
+
 Notes are written to `~/Meetings` (override with `VERBATIM_NOTES_DIR`). The
 local model defaults to `gemma4:12b` (override with `VERBATIM_LOCAL_MODEL`);
 the opt-in Claude model defaults to `sonnet` (`VERBATIM_CLAUDE_MODEL`).
