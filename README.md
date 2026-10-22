@@ -11,21 +11,27 @@ the meeting app.
 
 ## How it works
 
-Verbatim is a thin, opinionated layer over **[VoxType](https://voxtype.io)**'s
-built-in `meeting` mode, which already does the heavy lifting:
+**Record first, transcribe afterwards.** Click the mic on the Omarchy bar
+(plugin `contra.verbatim`), or run `verbatim start`. Verbatim records a plain
+audio file with your microphone on the left channel and the computer's output
+(the other side of the call) on the right. When you stop, a background job
+transcribes that file offline and files the meeting:
 
-- **Dual capture** — your mic (`You`) + the system-output loopback (`Remote`),
-  with GTCRN neural **echo cancellation** so your voice doesn't double.
-- **Local GPU transcription** — Parakeet/Whisper via ONNX (MIGraphX on this
-  AMD Radeon box; ~15× real-time).
-- **Diarization** — `simple` (You/Remote, great for 1:1) or `ml` (ECAPA
-  multi-speaker embeddings).
-- **Diarization** default is `ml` (ECAPA embeddings) so multiple people are
-  separated, not just You vs the merged "Remote" side.
+- **Transcription** — VoxType's Parakeet model (`parakeet-tdt-0.6b-v3`) run
+  through `onnx-asr` on the CPU, about 10× faster than real time.
+- **Speakers** — the left channel is "You"; voices on the right channel are
+  told apart with VoxType's ECAPA speaker model and clustered
+  (`SPEAKER_01`, `SPEAKER_02`, …). `verbatim identify --who` names them.
+- **Note** — the local AI analysis and the transcript are saved to
+  `~/Meetings/YYYY-MM-DD HHMM - Title.md`.
 
-Verbatim adds the friendly workflow on top: a one-command start/stop, a
-Fireflies-style saved note (`~/Meetings/YYYY-MM-DD HHMM - Title.md`), and a
-localhost browser GUI to name, browse, search, analyze, and label speakers.
+The audio file is never deleted, so a failed transcription can always be
+re-run: `verbatim import <file>`. VoxType's live meeting mode is no longer
+used, so dictation keeps working during a meeting.
+
+The bar shows idle, a recording timer, transcription progress or an error.
+Left click starts or stops, middle click opens the app (`verbatim app`), right
+click opens a small panel.
 
 ### AI analysis (the "Fireflies brain")
 

@@ -11,18 +11,36 @@ chmod +x "$HERE/bin/verbatim"
 ln -sf "$HERE/bin/verbatim" "$BIN/verbatim"
 echo "✓ linked $BIN/verbatim"
 
-# Desktop entry for the GUI
+# Offline transcriber: a venv on top of the system onnxruntime + numpy, adding
+# onnx-asr (pinned) to run VoxType's Parakeet model on recorded files.
+VENV="$HOME/.local/share/verbatim/venv"
+if [ ! -x "$VENV/bin/python" ]; then
+  python3 -m venv --system-site-packages "$VENV"
+fi
+"$VENV/bin/pip" install -q --no-deps onnx-asr==0.12.0
+"$VENV/bin/python" -c "import onnx_asr, onnxruntime, numpy" \
+  && echo "✓ transcriber ready ($VENV)"
+for m in parakeet-tdt-0.6b-v3 ecapa_tdnn.onnx; do
+  [ -e "$HOME/.local/share/voxtype/models/$m" ] \
+    || echo "⚠ missing VoxType model $m — download it with: voxtype setup model"
+done
+
+# App launcher (opens the GUI in its own window) + icon
+ICONS="$HOME/.local/share/icons/hicolor/scalable/apps"
+mkdir -p "$ICONS"
+cp "$HERE/assets/verbatim.svg" "$ICONS/verbatim.svg"
+gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" &>/dev/null || true
 sed "s|@HERE@|$HERE|g" "$HERE/verbatim.desktop" > "$APPS/verbatim.desktop"
 update-desktop-database "$APPS" 2>/dev/null || true
-echo "✓ installed GUI launcher (Verbatim) in your app menu"
+echo "✓ installed the Verbatim app launcher"
 
-# Ensure meeting mode is enabled + daemon has loaded it
-if command -v voxtype >/dev/null; then
-  cfg="$(voxtype config 2>/dev/null || true)"
-  if ! printf '%s\n' "$cfg" | grep -A2 '\[meeting\]' | grep -q 'enabled = true'; then
-    echo "⚠ VoxType meeting mode looks disabled — enable [meeting] in config.toml"
-    echo "  then: systemctl --user restart voxtype.service   (see README)"
-  fi
+# Omarchy bar plugin
+PLUGINS="$HOME/.config/omarchy/plugins"
+if [ -d "$PLUGINS" ]; then
+  ln -sfn "$HERE/omarchy-plugin" "$PLUGINS/contra.verbatim"
+  echo "✓ linked bar plugin contra.verbatim"
+  grep -q '"contra.verbatim"' "$HOME/.config/omarchy/shell.json" 2>/dev/null \
+    || echo "  add it to the bar with: omarchy bar put contra.verbatim"
 fi
 
 case ":$PATH:" in
@@ -30,5 +48,5 @@ case ":$PATH:" in
   *) echo "⚠ $BIN is not on your PATH — add it to use 'verbatim' directly." ;;
 esac
 echo
-echo "Done. Try:  verbatim start \"Test call\"   …then…   verbatim stop"
-echo "        or:  verbatim gui"
+echo "Done. Click the mic on the bar, or:  verbatim start \"Test call\"  …then…  verbatim stop"
+echo "        open the app:  verbatim app"

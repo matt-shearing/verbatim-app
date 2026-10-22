@@ -150,17 +150,10 @@ if _HAVE_QT:
             def work():
                 try:
                     if rec:
-                        core.stop_meeting()
-                        try:
-                            m = core.get_meeting("latest")
-                            if m:
-                                core.build_note(m.id, engine="none")
-                        except Exception:
-                            pass
+                        core.stop_meeting()  # processing continues in the background
                     else:
                         core.start_meeting(
-                            "Meeting " + datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            wait=True)
+                            "Meeting " + datetime.now().strftime("%Y-%m-%d %H:%M"))
                 except Exception:
                     pass
             threading.Thread(target=work, daemon=True).start()

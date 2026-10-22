@@ -211,12 +211,21 @@ function transcriptHtml(t){
   }).join('');
 }
 
+let lastState='';
+function clock(t){t=Math.max(0,t|0);const h=t/3600|0,m=(t%3600/60|0),s=t%60;
+  return (h?h+':'+String(m).padStart(2,'0'):m)+':'+String(s).padStart(2,'0')}
 async function refreshStatus(){
-  const s=await api('/api/status'); const rec=!!s.recording;
+  const s=await api('/api/status'); const st=s.state||'idle', rec=st==='recording';
   $('#hdr').classList.toggle('rec',rec);
-  $('#startBtn').style.display=rec?'none':'';
+  $('#startBtn').style.display=(rec||st==='processing')?'none':'';
   $('#stopBtn').style.display=rec?'':'none';
-  $('#recinfo').textContent=rec?('● Recording — '+(s.title||'')):'';
+  $('#recinfo').textContent=
+    rec?('● Recording '+clock(Date.now()/1000-(s.started_at||0))+' — '+(s.title||'')):
+    st==='processing'?('… '+(s.title||'')+' — '+(s.message||'Processing')):
+    st==='error'?('⚠ '+(s.message||'Something went wrong')):'';
+  // A recording just finished processing: show it.
+  if(lastState==='processing'&&st==='idle'&&s.meeting_id){loadList();openMeeting(s.meeting_id)}
+  lastState=st;
 }
 async function loadList(){
   const q=$('#search').value.trim();
@@ -384,10 +393,10 @@ $('#startBtn').onclick=async()=>{const t=prompt('Meeting title:',
   if(r.error)alert(r.error); refreshStatus()};
 $('#stopBtn').onclick=async()=>{$('#stopBtn').innerHTML='<span class="spin"></span> Saving…';
   const r=await api('/api/stop',{method:'POST'});
-  $('#stopBtn').innerHTML='■ Stop &amp; save'; refreshStatus(); loadList();
-  if(r.id){cur=r.id; openMeeting(r.id)} if(r.error)alert(r.error)};
+  $('#stopBtn').innerHTML='■ Stop &amp; save'; refreshStatus();
+  if(r.error)alert(r.error)};
 $('#search').oninput=loadList;
-loadList(); refreshStatus(); setInterval(refreshStatus,4000);
+loadList(); refreshStatus(); setInterval(refreshStatus,1000);
 </script></body></html>"""
 
 
@@ -450,12 +459,9 @@ class Handler(BaseHTTPRequestHandler):
             if p in ("/", "/index.html"):
                 return self._send(200, INDEX.encode(), "text/html; charset=utf-8")
             if p == "/api/status":
-                mid = core.is_recording()
-                title = None
-                if mid:
-                    m = core.get_meeting(mid) or core.get_meeting("latest")
-                    title = m.title if m else None
-                return self._json({"recording": mid, "title": title})
+                st = core.read_state()
+                st["recording"] = st.get("state") == "recording"
+                return self._json(st)
             if p == "/api/meetings":
                 q = parse_qs(u.query).get("q", [""])[0]
                 out = []
@@ -523,20 +529,13 @@ class Handler(BaseHTTPRequestHandler):
         b = self._body()
         try:
             if p == "/api/start":
-                mid = core.start_meeting(b.get("title") or None,
-                                        diarization="ml" if b.get("ml") else None)
-                return self._json({"recording": mid})
+                path = core.start_meeting(b.get("title") or None)
+                return self._json({"recording": True, "audio": str(path)})
             if p == "/api/stop":
-                if core.is_recording():
-                    core.stop_meeting()
-                m = core.get_meeting("latest")
-                failure = None
-                if m:
-                    core.build_note(m.id, engine="none")  # fast finalize
-                    # Audio captured but nothing transcribed - the UI must say so.
-                    failure = core.transcript_failure(m)
-                return self._json({"id": m.id if m else None,
-                                   "failed": bool(failure), "failure": failure})
+                # Processing runs in a background job; the status poll picks
+                # up its progress and opens the meeting when it is done.
+                cap = core.stop_meeting()
+                return self._json({"stopped": True, "audio": cap.get("path")})
             if p.startswith("/api/meeting/"):
                 parts = p.split("/")
                 mid, action = parts[3], parts[4]

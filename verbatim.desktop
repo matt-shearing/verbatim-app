@@ -3,8 +3,17 @@ Type=Application
 Name=Verbatim
 GenericName=Meeting Notes
 Comment=Record, transcribe and summarize meetings locally
-Exec=@HERE@/bin/verbatim gui
+Exec=@HERE@/bin/verbatim app
 Icon=verbatim
 Terminal=false
 Categories=AudioVideo;Audio;Utility;
 Keywords=meeting;transcribe;notes;recording;fireflies;
+Actions=record;stop;
+
+[Desktop Action record]
+Name=Start recording
+Exec=@HERE@/bin/verbatim start
+
+[Desktop Action stop]
+Name=Stop recording
+Exec=@HERE@/bin/verbatim stop

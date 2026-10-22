@@ -1,14 +1,15 @@
 """
 verbatim.core — shared logic for the Verbatim meeting recorder.
 
-Verbatim is a thin, opinionated layer over VoxType's `meeting` mode. VoxType
-does the hard parts (dual mic+system-audio capture, echo cancellation, GPU
-transcription, diarization, Ollama summaries); Verbatim adds a friendly
-start/stop workflow, Fireflies-style saved notes, and a browser GUI.
+Verbatim records a meeting off the desktop as a plain audio file (your mic on
+the left channel, the computer's output on the right), then transcribes that
+file offline once you stop (see verbatim/transcribe.py). The transcript lands
+in the same store VoxType's meeting mode used, so meetings recorded either way
+sit side by side. Verbatim adds Fireflies-style saved notes, local AI
+analysis and a browser GUI on top.
 
-Design rule: never parse VoxType's private on-disk transcript format. We drive
-the stable `voxtype meeting` CLI for content and read the meetings SQLite DB
-(read-only, documented columns) only for fast listing/metadata.
+The recording comes first and is never thrown away: if transcription or
+analysis fails, the audio is still there to re-run with `verbatim import`.
 """
 from __future__ import annotations
 
@@ -20,6 +21,8 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
+from contextlib import closing
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -92,15 +95,21 @@ AUTO_MODE_SWITCH = os.environ.get("VERBATIM_AUTO_MODE_SWITCH", "1") != "0"
 #   2. "audio_dir" in ~/.config/verbatim/config.json  (`verbatim audio-dir <path>`)
 #   3. ~/Meetings/audio
 #
-# Mixed mic + system-output, mono 16 kHz Opus @24k ≈ 8 MB/hour, which is both
-# cheap to keep forever and exactly what MOSS/Whisper want as input.
+# Mic on the left, system output on the right, 16 kHz Opus @32k ≈ 14 MB/hour:
+# cheap to keep forever, and keeping the two sides apart tells the
+# transcriber who is "You" without any guessing.
 CONFIG_FILE = Path(
     os.environ.get("VERBATIM_CONFIG", HOME / ".config/verbatim/config.json"))
 AUDIO_FALLBACK = NOTES_DIR / "audio"
-AUDIO_BITRATE = os.environ.get("VERBATIM_AUDIO_BITRATE", "24k")
+AUDIO_BITRATE = os.environ.get("VERBATIM_AUDIO_BITRATE", "32k")
 # Refuse a destination with less headroom than this; a meeting can run 3 hours.
 AUDIO_MIN_FREE_MB = int(os.environ.get("VERBATIM_AUDIO_MIN_FREE_MB", "500"))
 _CAPTURE_STATE = _VERBATIM_STATE / "audio-capture.json"
+_CAPTURE_LOG = _VERBATIM_STATE / "capture.log"
+# What the bar plugin and the GUI watch: idle | recording | processing | error.
+STATE_FILE = _VERBATIM_STATE / "state.json"
+VENV_PYTHON = Path(os.environ.get("VERBATIM_PYTHON",
+                                  _VERBATIM_STATE / "venv/bin/python"))
 
 
 class VerbatimError(RuntimeError):
@@ -226,27 +235,36 @@ def start_audio_capture(title: str | None) -> tuple[Path, str | None]:
     stamp = datetime.now().strftime("%Y-%m-%d %H%M")
     path = dest / f"{stamp} - {_fs_safe(title or 'meeting')}.opus"
 
-    inputs, filt = [], ""
     if mic and mon:
+        # Two separate channels, never a mix: left = you, right = everyone else.
         inputs = ["-f", "pulse", "-i", mic, "-f", "pulse", "-i", mon]
-        filt = "[0:a][1:a]amix=inputs=2:duration=longest:dropout_transition=0,aresample=16000[a]"
+        filt = ("[0:a]aresample=16000,pan=mono|c0=c0[m];"
+                "[1:a]aresample=16000,pan=mono|c0=0.5*c0+0.5*c1[r];"
+                "[m][r]amerge=inputs=2[a]")
+        chans = "2"
     else:
         inputs = ["-f", "pulse", "-i", mic or mon]
         filt = "[0:a]aresample=16000[a]"
+        chans = "1"
 
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs,
-           "-filter_complex", filt, "-map", "[a]", "-ac", "1",
+           "-filter_complex", filt, "-map", "[a]", "-ac", chans,
            "-c:a", "libopus", "-b:a", AUDIO_BITRATE, str(path)]
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                            start_new_session=True)
+    _CAPTURE_STATE.parent.mkdir(parents=True, exist_ok=True)
+    # stderr goes to a file, not a pipe: a pipe nobody reads would kill
+    # ffmpeg with SIGPIPE the first time it logs anything mid-meeting.
+    with open(_CAPTURE_LOG, "ab") as log:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=log,
+                                start_new_session=True)
     time.sleep(1.2)
     if proc.poll() is not None:
-        err = (proc.stderr.read() or b"").decode(errors="replace").strip()
-        raise VerbatimError(f"audio capture failed to start: {err[:300]}")
-    _CAPTURE_STATE.parent.mkdir(parents=True, exist_ok=True)
-    _CAPTURE_STATE.write_text(json.dumps({"pid": proc.pid, "path": str(path)}),
-                              encoding="utf-8")
+        err = _CAPTURE_LOG.read_text(errors="replace").strip().splitlines()[-3:]
+        raise VerbatimError(f"audio capture failed to start: {' '.join(err)[:300]}")
+    _CAPTURE_STATE.write_text(json.dumps({
+        "pid": proc.pid, "path": str(path), "title": title,
+        "started_at": int(time.time()), "mic": mic, "monitor": mon,
+    }), encoding="utf-8")
     return path, warning
 
 
@@ -617,21 +635,54 @@ def _apply_labels(md: str, labels: dict[int, str]) -> str:
     return re.sub(r"^###[ \t]+(.+?)[ \t]*$", repl, md, flags=re.M)
 
 
+def _storage_path(full_id: str) -> Path:
+    with _db() as con:
+        r = con.execute("select storage_path from meetings where id=?",
+                        (full_id,)).fetchone()
+    if not r or not r["storage_path"]:
+        raise VerbatimError(f"meeting {full_id[:8]} has no storage path")
+    return Path(r["storage_path"])
+
+
+def _stamp(ms: int) -> str:
+    s = ms // 1000
+    h, m, s = s // 3600, s % 3600 // 60, s % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
 def export_transcript(meeting_id: str, fmt: str = "markdown",
                       speakers: bool = True, timestamps: bool = True,
                       apply_labels: bool = True) -> str:
+    """Render a meeting's transcript.json as Markdown.
+
+    This used to shell out to `voxtype meeting export`, but VoxType 1.1.1 no
+    longer finds meetings in the store it wrote, so Verbatim reads the file
+    itself. The layout is the one VoxType produced: a `### Speaker` header
+    whenever the speaker changes, then `*[MM:SS]* text` lines.
+    """
     m = get_meeting(meeting_id)
     if not m:
         raise VerbatimError(f"no meeting matching '{meeting_id}'")
-    args = ["meeting", "export", m.id, "--format", fmt]
-    if speakers:
-        args.append("--speakers")
-    if timestamps:
-        args.append("--timestamps")
-    out = _vox(*args)
-    if apply_labels and fmt == "markdown":
-        out = _apply_labels(out, speaker_labels(m.id))
-    return out
+    try:
+        data = json.loads((_storage_path(m.id) / "transcript.json")
+                          .read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise VerbatimError(f"cannot read transcript for {m.short_id}: {e}")
+    segs = sorted(data.get("segments", []), key=lambda s: s.get("start_ms", 0))
+    out = [f"# {m.title or 'Untitled meeting'}", "", "## Transcript", ""]
+    cur = None
+    for s in segs:
+        who = s.get("speaker_id") or "Unknown"
+        if speakers and who != cur:
+            out += ["", f"### {who}", ""]
+            cur = who
+        text = (s.get("text") or "").strip()
+        line = f"*[{_stamp(s.get('start_ms', 0))}]* {text}" if timestamps else text
+        out += [line, ""]
+    md = "\n".join(out)
+    if apply_labels:
+        md = _apply_labels(md, speaker_labels(m.id))
+    return md
 
 
 # ── Speaker attribution (LLM-based, per-utterance) ──────────────────────────
@@ -917,12 +968,64 @@ def analyze(meeting_id: str, model: str | None = None, timeout: int = 600,
     return out
 
 
+def _db_rw() -> sqlite3.Connection:
+    """Writable connection, creating the store if this is the first meeting."""
+    MEETINGS_DB.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(MEETINGS_DB)
+    con.executescript(_SCHEMA)
+    return con
+
+
+# VoxType's own schema, so meetings recorded either way share one store.
+_SCHEMA = """
+create table if not exists meetings (
+    id TEXT PRIMARY KEY, title TEXT, started_at INTEGER NOT NULL,
+    ended_at INTEGER, duration_secs INTEGER,
+    status TEXT NOT NULL DEFAULT 'active', chunk_count INTEGER NOT NULL DEFAULT 0,
+    storage_path TEXT, audio_retained INTEGER NOT NULL DEFAULT 0, model TEXT,
+    synced_at INTEGER, created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')));
+create index if not exists idx_meetings_started_at on meetings(started_at DESC);
+create index if not exists idx_meetings_status on meetings(status);
+create table if not exists speaker_labels (
+    meeting_id TEXT NOT NULL, speaker_num INTEGER NOT NULL, label TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    PRIMARY KEY (meeting_id, speaker_num),
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE);
+"""
+
+
 def label_speaker(meeting_id: str, speaker: str, label: str) -> str:
-    return _vox("meeting", "label", _resolve(meeting_id), speaker, label)
+    m = get_meeting(meeting_id)
+    if not m:
+        raise VerbatimError(f"no meeting matching '{meeting_id}'")
+    num = int(speaker) if str(speaker).isdigit() else _speaker_num(str(speaker))
+    if num is None:
+        raise VerbatimError(f"unknown speaker '{speaker}' (use a number, "
+                            "'You' or 'SPEAKER_01')")
+    with closing(_db_rw()) as con:
+        con.execute("insert or replace into speaker_labels(meeting_id,"
+                    "speaker_num,label) values(?,?,?)", (m.id, num, label))
+        con.commit()
+    return f"Speaker {num} is now {label}"
 
 
 def delete_meeting(meeting_id: str) -> str:
-    return _vox("meeting", "delete", _resolve(meeting_id), "--force")
+    m = get_meeting(meeting_id)
+    if not m:
+        raise VerbatimError(f"no meeting matching '{meeting_id}'")
+    try:
+        store = _storage_path(m.id)
+    except VerbatimError:
+        store = None
+    with closing(_db_rw()) as con:
+        con.execute("delete from speaker_labels where meeting_id=?", (m.id,))
+        con.execute("delete from meetings where id=?", (m.id,))
+        con.commit()
+    # Only ever remove a directory inside the meeting store. The archived
+    # audio is kept: it is the one thing a deleted meeting can be rebuilt from.
+    if store and store.parent == MEETINGS_DB.parent and store.is_dir():
+        shutil.rmtree(store)
+    return f"deleted {m.title or m.short_id}"
 
 
 def rename_meeting(meeting_id: str, title: str) -> None:
@@ -939,73 +1042,190 @@ def rename_meeting(meeting_id: str, title: str) -> None:
 
 
 # ── Recording lifecycle ─────────────────────────────────────────────────────
+# Record first, transcribe afterwards:
+#   start  → ffmpeg writes the audio file; state = recording
+#   stop   → ffmpeg finalises the file; a detached `verbatim process` job starts
+#   process→ transcribe the file offline, file it as a meeting, write the note
+#            with the AI analysis; state = idle (or error, with the reason)
+# VoxType is not involved, so dictation keeps working during a meeting.
+def write_state(state: str, **kw) -> dict:
+    """Atomically rewrite state.json, which the bar plugin and GUI watch."""
+    d = {"state": state, "title": None, "started_at": None, "audio": None,
+         "meeting_id": None, "message": None}
+    d.update(kw)
+    d["updated_at"] = int(time.time())
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d), encoding="utf-8")
+    tmp.replace(STATE_FILE)
+    return d
+
+
+def _alive(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def read_state() -> dict:
+    """Current state, corrected against reality (a crashed job or a dead
+    ffmpeg must not leave the bar saying 'recording' forever)."""
+    try:
+        d = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        d = {"state": "idle"}
+    cap = _capture()
+    if cap and _alive(cap.get("pid")):
+        if d.get("state") != "recording":
+            d = write_state("recording", title=cap.get("title"),
+                            started_at=cap.get("started_at"), audio=cap.get("path"))
+    elif d.get("state") == "recording":
+        d = write_state("error", title=d.get("title"), audio=d.get("audio"),
+                        message="The recorder stopped unexpectedly. The audio "
+                                "so far is saved; run `verbatim import` on it.")
+    elif d.get("state") == "processing" and not _alive(d.get("pid")):
+        d = write_state("error", title=d.get("title"), audio=d.get("audio"),
+                        message="Processing stopped before it finished. "
+                                "Run `verbatim import` on the audio to retry.")
+    return d
+
+
+def _capture() -> dict | None:
+    try:
+        return json.loads(_CAPTURE_STATE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def is_recording() -> str | None:
-    """Return the active meeting id if one is recording, else None."""
-    out = _vox("meeting", "status", timeout=15)
-    m = re.search(r"Meeting ID:\s*([0-9a-f-]+)", out)
-    if "recording" in out.lower() and m:
-        return m.group(1)
-    return None
+    """The recording's audio path if one is running, else None."""
+    cap = _capture()
+    return cap.get("path") if cap and _alive(cap.get("pid")) else None
 
 
-def start_meeting(title: str | None = None, diarization: str | None = None,
-                  wait: bool = True, wait_timeout: int = 20) -> str:
-    """Start a meeting and (optionally) block until it is actually recording.
+def start_meeting(title: str | None = None) -> Path:
+    if is_recording():
+        raise VerbatimError("already recording")
+    title = title or f"Meeting {datetime.now():%Y-%m-%d %H:%M}"
+    path, warn = start_audio_capture(title)
+    if warn:
+        print(f"verbatim: {warn}", file=sys.stderr)
+    cap = _capture() or {}
+    write_state("recording", title=title, started_at=cap.get("started_at"),
+                audio=str(path))
+    return path
 
-    VoxType loads the ASR model on start (~5s), so 'start' returns before the
-    meeting is live; we poll status until it reports recording.
-    """
-    # Must happen BEFORE the start trigger: meeting mode fails on every chunk
-    # if the daemon is running with streaming = true.
-    enter_meeting_mode()
-    args = ["meeting", "start"]
+
+def stop_meeting(engine: str | None = None) -> dict:
+    """Finalise the audio and hand it to a background `verbatim process` job.
+    Returns the capture record ({path, title, started_at})."""
+    cap = _capture()
+    if not cap or not _alive(cap.get("pid")):
+        raise VerbatimError("nothing is recording")
+    path = stop_audio_capture()
+    if not path:
+        write_state("error", title=cap.get("title"),
+                    message="The recording was empty (no audio was written).")
+        raise VerbatimError("the recording was empty")
+    cap["path"] = str(path)
+    spawn_processing(path, cap.get("title"), cap.get("started_at"), engine)
+    return cap
+
+
+def spawn_processing(audio: Path, title: str | None, started_at: int | None,
+                     engine: str | None = None) -> None:
+    root = Path(__file__).resolve().parent.parent
+    args = [sys.executable, "-m", "verbatim", "process", str(audio)]
     if title:
         args += ["--title", title]
-    if diarization:
-        args += ["--diarization", diarization]
-    try:
-        _vox(*args, timeout=30)
-    except Exception:
-        exit_meeting_mode()  # don't strand the daemon out of dictation mode
-        raise
-    # Archival audio runs alongside VoxType's own capture. Start it after the
-    # meeting is confirmed so a failed start doesn't leave an orphan ffmpeg.
-    try:
-        _, warn = start_audio_capture(title)
-        if warn:
-            print(f"verbatim: {warn}", file=sys.stderr)
-    except (VerbatimError, OSError) as e:
-        # Transcription is still running; say so rather than aborting the meeting.
-        print(f"verbatim: WARNING - no audio archive for this meeting: {e}",
-              file=sys.stderr)
-    if not wait:
-        return ""
-    deadline = time.time() + wait_timeout
-    while time.time() < deadline:
-        mid = is_recording()
-        if mid:
-            return mid
-        time.sleep(1)
-    raise VerbatimError(
-        "meeting did not reach 'recording' state in time — is meeting mode "
-        "enabled and the daemon restarted? (`systemctl --user restart voxtype`)"
-    )
+    if started_at:
+        args += ["--started", str(started_at)]
+    if engine:
+        args += ["--engine", engine]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = f"{root}{os.pathsep}{env['PYTHONPATH']}" \
+        if env.get("PYTHONPATH") else str(root)
+    log = open(_VERBATIM_STATE / "process.log", "ab")
+    proc = subprocess.Popen(["nice", "-n", "10", *args], cwd=root, env=env,
+                            stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                            start_new_session=True)
+    write_state("processing", title=title, audio=str(audio), pid=proc.pid,
+                message="Starting transcription")
 
 
-def stop_meeting(settle_secs: int = 6) -> None:
-    mid = is_recording()
-    try:
-        _vox("meeting", "stop", timeout=30)
-        # give the daemon a moment to finalize the last chunk + persist
-        time.sleep(settle_secs)
-    finally:
-        # Always finalize the archive and hand dictation back its streaming
-        # config, even if the stop itself failed.
+def _guess_started(audio: Path) -> int:
+    """Start time from a 'YYYY-MM-DD HHMM - …' file name, else the file's age."""
+    m = re.match(r"(\d{4}-\d{2}-\d{2}) (\d{4})", audio.name)
+    if m:
+        return int(datetime.strptime(" ".join(m.groups()), "%Y-%m-%d %H%M").timestamp())
+    return int(audio.stat().st_mtime)
+
+
+def process_recording(audio: Path, title: str | None = None,
+                      started_at: int | None = None,
+                      engine: str | None = None) -> tuple[str, Path]:
+    """Transcribe an audio file, file it as a meeting and write its note.
+    Returns (meeting id, note path). Keeps state.json current throughout."""
+    audio = Path(audio).expanduser().resolve()
+    if not audio.is_file():
+        raise VerbatimError(f"no such audio file: {audio}")
+    title = title or re.sub(r"^\d{4}-\d{2}-\d{2} \d{4} - ", "", audio.stem)
+    started_at = started_at or _guess_started(audio)
+    common = {"title": title, "audio": str(audio), "pid": os.getpid()}
+    write_state("processing", message="Transcribing", **common)
+    if not VENV_PYTHON.exists():
+        raise VerbatimError(f"transcriber venv missing at {VENV_PYTHON} — "
+                            "run ./install.sh")
+
+    mid = str(uuid.uuid4())
+    stamp = datetime.fromtimestamp(started_at)
+    store = MEETINGS_DB.parent / f"{stamp:%Y-%m-%d-%H%M}-{_slug(title)[:60]}"
+    store.mkdir(parents=True, exist_ok=True)
+    root = Path(__file__).resolve().parent.parent
+    proc = subprocess.Popen(
+        [str(VENV_PYTHON), "-m", "verbatim.transcribe", str(audio),
+         str(store / "transcript.json")],
+        cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for line in proc.stdout:
         try:
-            stop_audio_capture(mid)
-        except OSError:
-            pass
-        exit_meeting_mode()
+            p = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        write_state("processing", message=f"{p['message']} ({int(p['progress'] * 100)}%)",
+                    **common)
+    err = proc.stderr.read()
+    if proc.wait() != 0:
+        raise VerbatimError("transcription failed: "
+                            + " ".join(err.strip().splitlines()[-3:])[:400])
+
+    data = json.loads((store / "transcript.json").read_text(encoding="utf-8"))
+    duration = int(data.get("duration_ms", 0) // 1000)
+    meta = {"id": mid, "title": title,
+            "started_at": datetime.fromtimestamp(started_at).astimezone().isoformat(),
+            "duration_secs": duration, "status": "completed", "chunk_count": 1,
+            "storage_path": str(store), "audio_retained": True,
+            "model": data.get("engine"), "audio": str(audio)}
+    (store / "metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    with closing(_db_rw()) as con:
+        con.execute(
+            "insert into meetings(id,title,started_at,ended_at,duration_secs,status,"
+            "chunk_count,storage_path,audio_retained,model) values(?,?,?,?,?,?,?,?,?,?)",
+            (mid, title, started_at, started_at + duration, duration, "completed",
+             1, str(store), 1, data.get("engine")))
+        con.commit()
+    _remember_audio(mid, audio)
+
+    write_state("processing", message="Writing the summary", meeting_id=mid, **common)
+    path, _ = build_note(mid, engine=engine)
+    write_state("idle", title=title, audio=str(audio), meeting_id=mid,
+                message=f"Saved: {path.name}")
+    return mid, path
 
 
 # ── Saved notes (the Fireflies-style artifact) ──────────────────────────────

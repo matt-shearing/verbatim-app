@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
+import time
+import urllib.request
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -28,21 +31,13 @@ def _err(msg: str) -> int:
 # ── commands ────────────────────────────────────────────────────────────────
 def cmd_start(a) -> int:
     if core.is_recording():
-        return _err("a meeting is already recording (use `verbatim stop`)")
+        return _err("already recording (use `verbatim stop`)")
     title = a.title or f"Meeting {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    # None = inherit VoxType's [meeting.diarization] backend (configured as "ml").
-    # The flags are explicit overrides for a single meeting.
-    diar = "simple" if a.simple else ("ml" if a.ml else None)
-    print(f"● Starting meeting: {title}")
-    print("  (loading model + opening mic/system capture…)")
-    mid = core.start_meeting(title, diarization=diar, wait=not a.no_wait)
+    path = core.start_meeting(title)
+    print(f"● Recording: {title}")
+    print(f"  audio → {path}")
+    print("  Stop with:  verbatim stop")
     _notify("Recording started", title)
-    _spawn_overlay()
-    if mid:
-        print(f"✓ Recording — id {mid[:8]}")
-        print("  Stop with:  verbatim stop")
-    else:
-        print("✓ Start requested (not waiting for confirmation)")
     return 0
 
 
@@ -64,51 +59,124 @@ def _engine_label(engine: str) -> str:
 
 
 def cmd_stop(a) -> int:
-    mid = core.is_recording()
-    if not mid:
-        # still allow finalizing 'latest' if the daemon already stopped it
-        print("No meeting is recording; finalizing most recent meeting.")
-    else:
-        print("■ Stopping…")
-        core.stop_meeting()
+    """Stop the recorder. Transcription and the AI note run in a background
+    job (watch `verbatim status`) unless --wait is given."""
     engine = _engine(a)
-    _notify("Recording stopped", "Transcribing & analyzing…")
-    target = mid or "latest"
-    print(f"  Building note ({_engine_label(engine)})…")
+    if getattr(a, "wait", False):
+        cap = core._capture()
+        if not core.is_recording() or not cap:
+            return _err("nothing is recording")
+        path = core.stop_audio_capture()
+        if not path:
+            return _err("the recording was empty")
+        print("■ Stopped. Transcribing…")
+        return _process(path, cap.get("title"), cap.get("started_at"), engine,
+                        open_note=not a.no_open)
     try:
-        path, _ = core.build_note(target, engine=engine)
+        cap = core.stop_meeting(engine=engine)
     except VerbatimError as e:
         return _err(str(e))
-    print(f"✓ Saved note: {path}")
+    print(f"■ Stopped: {cap.get('title')}")
+    print(f"  audio → {cap['path']}")
+    print("  Transcribing and summarising in the background "
+          "(`verbatim status` shows progress).")
+    _notify("Recording stopped", "Transcribing and summarising…")
+    return 0
 
-    # A recording that captured audio but transcribed none of it used to pass
-    # silently as "No speech was captured". Make it impossible to miss.
-    m = core.get_meeting(target)
+
+def _process(audio, title, started_at, engine, open_note=False) -> int:
+    try:
+        mid, path = core.process_recording(Path(audio), title, started_at, engine)
+    except Exception as e:  # noqa: BLE001 — the bar must hear about any failure
+        core.write_state("error", title=title, audio=str(audio),
+                         message=f"Processing failed: {e}")
+        _notify("⚠ Verbatim: processing failed",
+                f"{e}\nThe audio is safe: {audio}")
+        return _err(f"processing failed: {e}\n  the audio is safe: {audio}")
+    m = core.get_meeting(mid)
     failure = core.transcript_failure(m) if m else None
     if failure:
-        print(f"\n⚠  RECORDING FAILED — {failure}", file=sys.stderr)
-        _notify("⚠ Verbatim: recording failed",
-                "Audio was captured but nothing was transcribed.")
+        print(f"⚠  {failure}", file=sys.stderr)
+        _notify("⚠ Verbatim: no speech found", str(path))
     else:
-        _notify("Meeting note ready", str(path))
-    if not a.no_open:
+        _notify("Meeting note ready", m.title if m else str(path))
+    print(f"✓ Saved note: {path}")
+    if open_note:
         _open_file(str(path))
     return 0
 
 
+def cmd_process(a) -> int:
+    """Background half of `stop` (also usable by hand)."""
+    return _process(a.audio, a.title, a.started, a.engine or core.AI_ENGINE)
+
+
+def cmd_import(a) -> int:
+    """Transcribe any recording and file it as a meeting."""
+    engine = _engine(a)
+    print(f"Transcribing {a.audio} …")
+    return _process(a.audio, a.title, None, engine, open_note=not a.no_open)
+
+
 def cmd_toggle(a) -> int:
-    """One-key friendly: start if idle, stop+save if recording."""
+    """One-key friendly: start if idle, stop (and process) if recording."""
     if core.is_recording():
+        a.wait = False
         return cmd_stop(a)
+    if core.read_state().get("state") == "processing":
+        return _err("still processing the last recording")
     a.title = None
-    a.ml = False
-    a.no_wait = False
     return cmd_start(a)
 
 
 def cmd_status(a) -> int:
-    print(core._vox("meeting", "status", timeout=15))
+    st = core.read_state()
+    state = st.get("state", "idle")
+    if state == "recording":
+        mins = (int(datetime.now().timestamp()) - (st.get("started_at") or 0)) // 60
+        print(f"● Recording: {st.get('title')} ({mins} min)\n  audio → {st.get('audio')}")
+    elif state == "processing":
+        print(f"… Processing: {st.get('title')} — {st.get('message')}")
+    elif state == "error":
+        print(f"⚠ {st.get('message')}\n  audio → {st.get('audio')}")
+    else:
+        print("Idle." + (f" Last: {st.get('message')}" if st.get("message") else ""))
     return 0
+
+
+def cmd_state(a) -> int:
+    print(json.dumps(core.read_state()))
+    return 0
+
+
+def cmd_app(a) -> int:
+    """Open Verbatim in its own app window (starting the web GUI if needed)."""
+    url = "http://127.0.0.1:8777/"
+    if not _gui_up(url):
+        subprocess.run(["systemctl", "--user", "start", "verbatim.service"],
+                       check=False)
+        for _ in range(20):
+            if _gui_up(url):
+                break
+            time.sleep(0.25)
+    # Omarchy's launcher focuses the window if it is already open, matching
+    # on the page title set in gui.INDEX.
+    for cmd in (["omarchy-launch-or-focus-webapp", "Verbatim — Meeting Notes", url],
+                ["chromium", f"--app={url}"]):
+        if shutil.which(cmd[0]):
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+            return 0
+    webbrowser.open(url)
+    return 0
+
+
+def _gui_up(url: str) -> bool:
+    try:
+        with urllib.request.urlopen(url + "api/status", timeout=1):
+            return True
+    except OSError:
+        return False
 
 
 def cmd_audio_dir(a) -> int:
@@ -301,12 +369,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("start", help="start recording a meeting")
     s.add_argument("title", nargs="?", help="meeting title")
-    s.add_argument("--ml", action="store_true",
-                   help="force ML multi-speaker diarization (ECAPA embeddings)")
-    s.add_argument("--simple", action="store_true",
-                   help="force simple You/Remote diarization (1:1 calls only)")
-    s.add_argument("--no-wait", action="store_true",
-                   help="don't wait for the recording to confirm")
     s.set_defaults(func=cmd_start)
 
     s = sub.add_parser("audio-dir",
@@ -330,15 +392,34 @@ def build_parser() -> argparse.ArgumentParser:
                         help="transcript only, no AI analysis")
 
     for name in ("stop", "finish"):
-        s = sub.add_parser(name, help="stop recording → transcribe → AI analysis → save note")
+        s = sub.add_parser(name, help="stop recording; transcribe + summarise in the background")
         _ai_flags(s)
+        s.add_argument("--wait", action="store_true",
+                       help="process in the foreground and open the note")
         s.add_argument("--no-open", action="store_true", help="don't open the note after")
         s.set_defaults(func=cmd_stop)
 
-    s = sub.add_parser("toggle", help="start if idle, else stop+save (for a hotkey)")
+    s = sub.add_parser("toggle", help="start if idle, else stop (for a hotkey or the bar)")
     _ai_flags(s)
     s.add_argument("--no-open", action="store_true", default=True)
     s.set_defaults(func=cmd_toggle)
+
+    s = sub.add_parser("process", help=argparse.SUPPRESS)
+    s.add_argument("audio")
+    s.add_argument("--title")
+    s.add_argument("--started", type=int)
+    s.add_argument("--engine")
+    s.set_defaults(func=cmd_process)
+
+    s = sub.add_parser("import", help="transcribe an audio file and file it as a meeting")
+    s.add_argument("audio")
+    s.add_argument("--title")
+    _ai_flags(s)
+    s.add_argument("--no-open", action="store_true")
+    s.set_defaults(func=cmd_import)
+
+    sub.add_parser("state", help="machine-readable status (JSON)").set_defaults(func=cmd_state)
+    sub.add_parser("app", help="open Verbatim in its own window").set_defaults(func=cmd_app)
 
     sub.add_parser("status", help="show current recording status").set_defaults(func=cmd_status)
 

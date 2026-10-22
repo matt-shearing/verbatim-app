@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "contra.verbatim",
+  "name": "Verbatim",
+  "version": "0.1.0",
+  "author": "contra",
+  "license": "MIT",
+  "description": "Verbatim meeting recorder on the bar: a mic that shows idle, recording time, transcribing progress or an error. Left click starts or stops a recording, middle click opens the app, right click opens a small panel.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Verbatim",
+    "description": "Start and stop Verbatim meeting recordings and watch transcription progress.",
+    "category": "AI",
+    "aliases": [
+      "verbatim",
+      "meeting",
+      "recorder",
+      "record",
+      "transcribe",
+      "minutes"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
