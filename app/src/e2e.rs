@@ -7,9 +7,9 @@
 //! VERBATIM_TEST_URL=http://127.0.0.1:8790 cargo test -- --ignored --nocapture
 //! ```
 //!
-//! The scratch backend must hold the meetings dbbc6f08 ("David & Matt") and
-//! ee4d151e ("Call with John"), and its AI endpoint should be unreachable so
-//! the summary and identify jobs fail fast.
+//! The scratch backend must hold at least two meetings, one of them already
+//! summarised, and its AI endpoint should be unreachable so the summary and
+//! identify jobs fail fast. The test works on whichever meetings it finds.
 
 use crate::*;
 use iced::futures::StreamExt;
@@ -56,32 +56,36 @@ fn mutating_flows_against_scratch_backend() {
     drive(&rt, &mut app, boot);
     assert_eq!(app.status.state, "idle");
     assert!(app.meetings.len() >= 2, "scratch list: {:?}", app.meetings.len());
+    let first = app.meetings.iter().find(|m| m.analyzed).expect("a summarised meeting").clone();
+    let other = app.meetings.iter().find(|m| m.id != first.id).unwrap().clone();
+    let id = first.id[..8].to_string();
+    let renamed = format!("{} (scratch)", first.title);
 
     // Open a meeting by its short id.
-    send(&rt, &mut app, Message::Select("dbbc6f08".into()));
+    send(&rt, &mut app, Message::Select(id.clone()));
     let d = app.detail.clone().expect("detail loaded");
-    assert_eq!(d.title, "David & Matt");
+    assert_eq!(d.title, first.title);
     assert!(app.selected.as_deref() == Some(d.id.as_str()), "short id resolved to full");
     assert!(!app.summary.is_empty(), "summary parsed");
     assert!(app.blocks.len() > 3, "transcript grouped");
 
     // Rename.
-    send(&rt, &mut app, Message::EditTitle("David & Matt (scratch)".into()));
+    send(&rt, &mut app, Message::EditTitle(renamed.clone()));
     send(&rt, &mut app, Message::SaveTitle);
-    assert_eq!(api.meeting("dbbc6f08").unwrap().title, "David & Matt (scratch)");
-    assert_eq!(app.detail.as_ref().unwrap().title, "David & Matt (scratch)");
-    assert!(app.meetings.iter().any(|m| m.title == "David & Matt (scratch)"));
+    assert_eq!(api.meeting(&id).unwrap().title, renamed);
+    assert_eq!(app.detail.as_ref().unwrap().title, renamed);
+    assert!(app.meetings.iter().any(|m| m.title == renamed));
 
     // Name a speaker.
     send(&rt, &mut app, Message::ToggleNames);
     let slot = app.label_edits.iter().position(|(n, _, _)| *n == 1).expect("speaker 1");
     send(&rt, &mut app, Message::EditLabel(slot, "Test Person".into()));
     send(&rt, &mut app, Message::SaveLabels);
-    let labels = api.meeting("dbbc6f08").unwrap().speaker_slots;
+    let labels = api.meeting(&id).unwrap().speaker_slots;
     assert!(labels.iter().any(|s| s.num == Some(1) && s.label == "Test Person"), "{labels:?}");
 
     // Give one transcript block a new name.
-    send(&rt, &mut app, Message::Select("dbbc6f08".into()));
+    send(&rt, &mut app, Message::Select(id.clone()));
     let block = 1;
     let first_line = app.blocks[block].lines[0];
     let line_i = app.utterances.as_ref().unwrap().utterances[first_line].i;
@@ -89,7 +93,7 @@ fn mutating_flows_against_scratch_backend() {
     assert!(app.block_edit.is_some());
     send(&rt, &mut app, Message::BlockEditInput("Someone Else".into()));
     send(&rt, &mut app, Message::BlockEditSave);
-    let u = api.utterances("dbbc6f08").unwrap();
+    let u = api.utterances(&id).unwrap();
     assert_eq!(u.utterances.iter().find(|x| x.i == line_i).unwrap().speaker, "Someone Else");
 
     // Rename that person everywhere.
@@ -97,7 +101,7 @@ fn mutating_flows_against_scratch_backend() {
     send(&rt, &mut app, Message::BlockPick(block, RENAME_ALL.into()));
     send(&rt, &mut app, Message::BlockEditInput("Another Name".into()));
     send(&rt, &mut app, Message::BlockEditSave);
-    let u = api.utterances("dbbc6f08").unwrap();
+    let u = api.utterances(&id).unwrap();
     assert!(u.utterances.iter().any(|x| x.speaker == "Another Name"));
     assert!(!u.utterances.iter().any(|x| x.speaker == "Someone Else"));
 
@@ -117,7 +121,7 @@ fn mutating_flows_against_scratch_backend() {
 
     // Identify speakers with a roster.
     send(&rt, &mut app, Message::ToggleIdentify);
-    send(&rt, &mut app, Message::WhoInput("Matt, David".into()));
+    send(&rt, &mut app, Message::WhoInput("Alex, Sam".into()));
     send(&rt, &mut app, Message::Identify);
     for _ in 0..60 {
         if !app.identify_job.as_ref().unwrap().running {
@@ -131,19 +135,20 @@ fn mutating_flows_against_scratch_backend() {
     eprintln!("identify job finished: error = {:?}", job.error);
 
     // The note endpoint writes a file into the scratch notes directory.
-    let note = api.action("dbbc6f08", "note", serde_json::json!({})).unwrap();
+    let note = api.action(&id, "note", serde_json::json!({})).unwrap();
     eprintln!("note written: {note}");
     assert!(std::path::Path::new(note["path"].as_str().unwrap()).exists());
 
     // Search, then Escape clears it.
-    send(&rt, &mut app, Message::SearchInput("John".into()));
-    assert!(app.meetings.iter().any(|m| m.title == "Call with John"));
+    let word = other.title.split_whitespace().next().unwrap().to_string();
+    send(&rt, &mut app, Message::SearchInput(word));
+    assert!(app.meetings.iter().any(|m| m.id == other.id));
     send(&rt, &mut app, Message::Escape);
     assert!(app.search.is_empty());
     assert!(app.meetings.len() >= 2);
 
     // Delete, with confirmation.
-    send(&rt, &mut app, Message::Select("ee4d151e".into()));
+    send(&rt, &mut app, Message::Select(other.id.clone()));
     send(&rt, &mut app, Message::AskDelete);
     assert!(app.confirm_delete);
     send(&rt, &mut app, Message::Escape);
@@ -151,6 +156,6 @@ fn mutating_flows_against_scratch_backend() {
     send(&rt, &mut app, Message::AskDelete);
     send(&rt, &mut app, Message::ConfirmDelete);
     assert!(app.selected.is_none());
-    assert!(!app.meetings.iter().any(|m| m.title == "Call with John"));
-    assert!(api.meeting("ee4d151e").is_err());
+    assert!(!app.meetings.iter().any(|m| m.id == other.id));
+    assert!(api.meeting(&other.id).is_err());
 }

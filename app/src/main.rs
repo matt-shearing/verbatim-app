@@ -385,11 +385,10 @@ impl App {
                         }
                         if finished {
                             tasks.push(self.fetch_list());
-                            if self.status.state == "idle" {
-                                if let Some(id) = new_meeting {
+                            if self.status.state == "idle"
+                                && let Some(id) = new_meeting {
                                     tasks.push(self.update(Message::Select(id)));
                                 }
-                            }
                         }
                         Task::batch(tasks)
                     }
@@ -893,11 +892,10 @@ pub fn same_id(a: &str, b: &str) -> bool {
 pub fn pretty_speaker(tag: &str) -> String {
     let lower = tag.to_ascii_lowercase();
     for prefix in ["speaker_", "speaker "] {
-        if let Some(rest) = lower.strip_prefix(prefix) {
-            if let Ok(n) = rest.parse::<u32>() {
+        if let Some(rest) = lower.strip_prefix(prefix)
+            && let Ok(n) = rest.parse::<u32>() {
                 return format!("Speaker {n}");
             }
-        }
     }
     tag.to_string()
 }

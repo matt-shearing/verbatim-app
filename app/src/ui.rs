@@ -842,14 +842,12 @@ pub fn nice_date(s: &str) -> String {
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     let (date, time) = s.split_once(' ').unwrap_or((s, ""));
     let parts: Vec<&str> = date.split('-').collect();
-    if let [y, m, d] = parts.as_slice() {
-        if let (Ok(m), Ok(d)) = (m.parse::<usize>(), d.parse::<u32>()) {
-            if (1..=12).contains(&m) {
+    if let [y, m, d] = parts.as_slice()
+        && let (Ok(m), Ok(d)) = (m.parse::<usize>(), d.parse::<u32>())
+            && (1..=12).contains(&m) {
                 let base = format!("{d} {} {y}", MONTHS[m - 1]);
                 return if time.is_empty() { base } else { format!("{base}, {time}") };
             }
-        }
-    }
     s.to_string()
 }
 
@@ -857,11 +855,10 @@ pub fn nice_date(s: &str) -> String {
 pub fn progress_text(msg: &str) -> String {
     if let Some(open) = msg.rfind(" (") {
         let inner = &msg[open + 2..];
-        if let Some(pct) = inner.strip_suffix(')') {
-            if pct.ends_with('%') {
+        if let Some(pct) = inner.strip_suffix(')')
+            && pct.ends_with('%') {
                 return format!("{} {}", &msg[..open], pct);
             }
-        }
     }
     msg.to_string()
 }

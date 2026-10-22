@@ -33,6 +33,13 @@ The bar shows idle, a recording timer, transcription progress or an error.
 Left click starts or stops, middle click opens the app (`verbatim app`), right
 click opens a small panel.
 
+`verbatim app` opens the native app (Rust and iced, in `app/`; `install.sh`
+builds it when `cargo` is present and installs `~/.local/bin/verbatim-app`). It
+follows the live Omarchy theme and font and talks to the backend's local API on
+port 8777 (`VERBATIM_URL` points it elsewhere). Without the binary, `verbatim
+app` opens the old browser page instead. Keys: Ctrl+R records or stops, Ctrl+F
+searches, Esc clears the search.
+
 ### AI analysis (the "Fireflies brain")
 
 The `stop`/`note`/`ai` commands run an AI pass over the transcript that
