@@ -70,12 +70,15 @@ def cmd_stop(a) -> int:
         path = core.stop_audio_capture()
         if not path:
             return _err("the recording was empty")
+        cap["path"] = str(path)
+        core.check_long_enough(cap)
         print("■ Stopped. Transcribing…")
         return _process(path, cap.get("title"), cap.get("started_at"), engine,
                         open_note=not a.no_open)
     try:
         cap = core.stop_meeting(engine=engine)
     except VerbatimError as e:
+        _notify("Verbatim: not transcribed", str(e))
         return _err(str(e))
     print(f"■ Stopped: {cap.get('title')}")
     print(f"  audio → {cap['path']}")

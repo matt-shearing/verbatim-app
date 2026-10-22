@@ -2,10 +2,12 @@
 
 // Pure helpers for contra.verbatim. No QML, no side effects.
 
-var GLYPH_MIC = String.fromCodePoint(0xF036C)        // nf-md-microphone
-var GLYPH_REC = String.fromCodePoint(0xF044A)        // nf-md-record
-var GLYPH_BUSY = String.fromCodePoint(0xF051F)       // nf-md-timer_sand
-var GLYPH_ERROR = String.fromCodePoint(0xF036D)      // nf-md-microphone_off
+// One quote-bubble mark in every state, so Verbatim never looks like the
+// other mic widgets on the bar; colour says which state it is in.
+var GLYPH_MIC = String.fromCodePoint(0xF1022)        // nf-md-comment_quote_outline (idle)
+var GLYPH_REC = String.fromCodePoint(0xF1021)        // nf-md-comment_quote (recording)
+var GLYPH_BUSY = String.fromCodePoint(0xF1021)       // nf-md-comment_quote (processing)
+var GLYPH_ERROR = String.fromCodePoint(0xF1022)      // nf-md-comment_quote_outline (error)
 
 var AMBER = "#d29922"
 

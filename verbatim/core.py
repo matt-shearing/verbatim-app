@@ -108,6 +108,9 @@ _CAPTURE_STATE = _VERBATIM_STATE / "audio-capture.json"
 _CAPTURE_LOG = _VERBATIM_STATE / "capture.log"
 # What the bar plugin and the GUI watch: idle | recording | processing | error.
 STATE_FILE = _VERBATIM_STATE / "state.json"
+# Anything shorter is an accidental start, not a meeting: it is not
+# transcribed and the bar reports it as an error (the audio is kept).
+MIN_RECORDING_SECS = int(os.environ.get("VERBATIM_MIN_SECONDS", "30"))
 VENV_PYTHON = Path(os.environ.get("VERBATIM_PYTHON",
                                   _VERBATIM_STATE / "venv/bin/python"))
 
@@ -1134,8 +1137,20 @@ def stop_meeting(engine: str | None = None) -> dict:
                     message="The recording was empty (no audio was written).")
         raise VerbatimError("the recording was empty")
     cap["path"] = str(path)
+    check_long_enough(cap)
     spawn_processing(path, cap.get("title"), cap.get("started_at"), engine)
     return cap
+
+
+def check_long_enough(cap: dict) -> None:
+    """Refuse to transcribe a recording shorter than MIN_RECORDING_SECS."""
+    secs = int(time.time()) - int(cap.get("started_at") or 0)
+    if cap.get("started_at") and secs < MIN_RECORDING_SECS:
+        msg = (f"Recording was only {secs} s, so it was not transcribed "
+               f"(the minimum is {MIN_RECORDING_SECS} s).")
+        write_state("error", title=cap.get("title"), audio=cap.get("path"),
+                    message=msg)
+        raise VerbatimError(msg)
 
 
 def spawn_processing(audio: Path, title: str | None, started_at: int | None,
@@ -1306,6 +1321,9 @@ def transcript_failure(m: "Meeting", transcript_body: str | None = None) -> str 
         return None
     if body.strip() and "_No speech was captured._" not in body:
         return None
+    if (m.model or "").startswith("verbatim-offline"):
+        return ("no speech was found in the recording. Check the audio file "
+                "plays, and that the right microphone was the default input.")
 
     hint = ""
     try:
