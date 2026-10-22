@@ -489,6 +489,12 @@ class Handler(BaseHTTPRequestHandler):
                     d["analysis"] = core.get_cached_analysis(m.id) or ""
                     d["analyzed"] = bool(d["analysis"])
                     d["stats"] = core.speaker_stats(m.id)
+                    # Where the files live, so a native client can open them.
+                    note = core.note_path(m)
+                    audio = core.audio_path_for(m.id)
+                    d["note_path"] = str(note)
+                    d["note_exists"] = note.exists()
+                    d["audio_path"] = str(audio) if audio else None
                     return self._json(d)
                 if parts[4] == "transcript":
                     return self._text(core.export_transcript(mid))

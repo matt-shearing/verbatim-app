@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -149,8 +150,17 @@ def cmd_state(a) -> int:
     return 0
 
 
+def _native_app() -> str | None:
+    """The native Rust app (app/ in this repo), if it is installed."""
+    found = shutil.which("verbatim-app")
+    if found:
+        return found
+    local = Path.home() / ".local/bin/verbatim-app"
+    return str(local) if os.access(local, os.X_OK) else None
+
+
 def cmd_app(a) -> int:
-    """Open Verbatim in its own app window (starting the web GUI if needed)."""
+    """Open Verbatim in its own app window (starting the backend if needed)."""
     url = "http://127.0.0.1:8777/"
     if not _gui_up(url):
         subprocess.run(["systemctl", "--user", "start", "verbatim.service"],
@@ -159,6 +169,16 @@ def cmd_app(a) -> int:
             if _gui_up(url):
                 break
             time.sleep(0.25)
+    native = _native_app()
+    if native:
+        # The native window's app id is "verbatim", so a second launch
+        # focuses the open window instead of starting another.
+        cmd = (["omarchy-launch-or-focus", "^verbatim$", shlex.quote(native)]
+               if shutil.which("omarchy-launch-or-focus") else [native])
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        return 0
+    # Fallback: the browser page served by the backend.
     # Omarchy's launcher focuses the window if it is already open, matching
     # on the page title set in gui.INDEX.
     for cmd in (["omarchy-launch-or-focus-webapp", "Verbatim — Meeting Notes", url],

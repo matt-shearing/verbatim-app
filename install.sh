@@ -25,7 +25,20 @@ for m in parakeet-tdt-0.6b-v3 ecapa_tdnn.onnx; do
     || echo "⚠ missing VoxType model $m — download it with: voxtype setup model"
 done
 
-# App launcher (opens the GUI in its own window) + icon
+# Native app (Rust, app/): `verbatim app` runs it when it is installed and
+# falls back to the browser page otherwise.
+if command -v cargo >/dev/null 2>&1; then
+  if cargo build --release --locked --manifest-path "$HERE/app/Cargo.toml"; then
+    install -m 755 "$HERE/app/target/release/verbatim-app" "$BIN/verbatim-app"
+    echo "✓ installed the native app ($BIN/verbatim-app)"
+  else
+    echo "⚠ the native app did not build; 'verbatim app' will open the browser page"
+  fi
+else
+  echo "⚠ cargo not found; skipping the native app ('verbatim app' opens the browser page)"
+fi
+
+# App launcher (opens the app in its own window) + icon
 ICONS="$HOME/.local/share/icons/hicolor/scalable/apps"
 mkdir -p "$ICONS"
 cp "$HERE/assets/verbatim.svg" "$ICONS/verbatim.svg"
