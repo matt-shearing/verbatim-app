@@ -43,6 +43,18 @@ MAX_SEG_S = 25.0                 # Parakeet is happiest under ~30 s per call
 MIN_SEG_S = 0.35
 MERGE_GAP_S = 0.6
 PAD_S = 0.15
+# onnxruntime defaults to one thread per core for every session. On a 32-core
+# box that ran 280 threads, loaded the machine to 60+ and was no faster: four
+# threads transcribe as quickly as the GPU does (measured 26 Nov 2026).
+THREADS = int(os.environ.get("VERBATIM_ASR_THREADS", "4"))
+
+
+def _session_options():
+    import onnxruntime as ort
+    so = ort.SessionOptions()
+    so.intra_op_num_threads = THREADS
+    so.inter_op_num_threads = 1
+    return so
 # Cosine similarity of ECAPA embeddings: same voice ~0.3-0.55, different
 # voices ~0.17 (measured on the 2026-09-30 meeting). Merge above this.
 SAME_SPEAKER = float(os.environ.get("VERBATIM_SAME_SPEAKER", "0.27"))
@@ -198,6 +210,7 @@ def transcribe(audio: str, out_path: str) -> dict:
 
     say(0.06, "Loading speech model")
     asr = onnx_asr.load_model(f"nemo-{ASR_MODEL}", str(MODELS / ASR_MODEL),
+                              sess_options=_session_options(),
                               providers=["CPUExecutionProvider"])
     audio_of = dict(tracks)
     texts: list[str] = []
@@ -212,6 +225,7 @@ def transcribe(audio: str, out_path: str) -> dict:
 
     say(0.9, "Telling speakers apart")
     spk = ort.InferenceSession(str(MODELS / "ecapa_tdnn.onnx"),
+                               sess_options=_session_options(),
                                providers=["CPUExecutionProvider"])
     speaker = ["You" if src == "microphone" else None for src, _, _ in items]
     # The left channel is the person recording. Everyone else arrives on the
