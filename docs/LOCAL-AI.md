@@ -25,8 +25,21 @@ verbatim (this box)                        gpu-node (RTX 4080, 12GB)
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `VERBATIM_AI_ENGINE` | `local` | `local` or `claude`. No silent fallback between them — if the transcript must stay local, it stays local. |
-| `VERBATIM_LOCAL_URL` | `http://127.0.0.1:11435` | Base URL of the OpenAI-compatible server (the SSH tunnel to the GPU node). Point at `http://gpu-node:11434` directly if the firewall port is opened. |
-| `VERBATIM_LOCAL_MODEL` | `gemma4:12b` | Model tag. `qwen3.5:9b` is also pulled as an alternative. |
+| `VERBATIM_LOCAL_URL` | `http://127.0.0.1:11434` | Base URL of the server: Ollama on this machine. Use `http://127.0.0.1:11435` for the SSH tunnel to the 12 GB GPU node. Also `local_url` in `config.json`. |
+| `VERBATIM_LOCAL_MODEL` | `qwen3.6:27b` | Model tag. Needs about 17 GB of VRAM; use `gemma4:12b` on the 12 GB node. Also `local_model` in `config.json`. |
+| `VERBATIM_LOCAL_CTX_MAX` | `65536` | Upper limit on the context window. Each request is sized to its transcript, because Ollama's small default context truncates silently. |
+| `VERBATIM_GLOSSARY` | `~/.config/verbatim/glossary.md` | Private list of names and terms, given to the model so it can fix mis-heard words. Not in the repo. |
+
+`config.json` can also hold `"recorder": "Your Name"`, so the model knows who "You" is.
+
+## Model choice, November 2026 update
+
+On a 24 GB card, `qwen3.6:27b` in Ollama is the default. In a blind comparison on two real
+meetings (43 and 48 minutes) it tied Inkling 2 Mini (Unsloth Q4_K_XL on a Vulkan llama-server)
+and took 80–90 s per meeting. Inkling was slightly faster, but Ollama's Inkling support dropped
+its output at the time, so it would have needed a separate server. All models made the same
+mistakes (figures recalculated, tentative dates stated as agreed, mis-heard names), which the
+glossary and the accuracy rules in `prompts/analysis.md` address.
 
 ## Model choice (researched + tested 2026-08)
 

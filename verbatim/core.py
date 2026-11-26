@@ -41,13 +41,18 @@ CLAUDE_MODEL = os.environ.get("VERBATIM_CLAUDE_MODEL", "sonnet")
 # AI engine: "local" (an OpenAI-compatible server on this machine or the LAN —
 # nothing leaves the network) or "claude" (Claude Code CLI, cloud).
 AI_ENGINE = os.environ.get("VERBATIM_AI_ENGINE", "local")
-# Default is the SSH tunnel to the GPU node (verbatim-ai-tunnel.service); point
-# this straight at a LAN host (e.g. http://gpu-node:11434) if its firewall allows.
-LOCAL_URL = os.environ.get("VERBATIM_LOCAL_URL", "http://127.0.0.1:11435").rstrip("/")
-# gemma4:12b won head-to-head testing (2026-08): perfect speaker attribution
-# and clean analysis with thinking off; qwen3.5:9b misattributed speakers
-# without thinking and rambled unusably with it. Both are pulled on the GPU node.
-LOCAL_MODEL = os.environ.get("VERBATIM_LOCAL_MODEL", "gemma4:12b")
+# Default is Ollama on this machine. For the old 12 GB GPU node, use the SSH
+# tunnel (verbatim-ai-tunnel.service, http://127.0.0.1:11435) with a model that
+# fits there, such as gemma4:12b.
+LOCAL_URL = os.environ.get("VERBATIM_LOCAL_URL", "http://127.0.0.1:11434").rstrip("/")
+# qwen3.6:27b replaced gemma4:12b in Nov 2026: in a blind comparison on two
+# real meetings it tied Inkling 2 Mini (whose Ollama support was broken at the
+# time) and clearly beat the smaller models. Both settings can also be set in
+# config.json ("local_url", "local_model"); the environment wins.
+LOCAL_MODEL = os.environ.get("VERBATIM_LOCAL_MODEL", "qwen3.6:27b")
+# Ollama's default context is a few thousand tokens and it truncates the
+# transcript silently, so the context is sized to each prompt up to this cap.
+LOCAL_CTX_MAX = int(os.environ.get("VERBATIM_LOCAL_CTX_MAX", "65536"))
 PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -448,13 +453,61 @@ def _llm_post(url: str, payload: dict, timeout: int) -> dict:
             pass
         raise VerbatimError(
             f"local AI server error ({e.code}): {detail or e.reason} — "
-            f"is model '{LOCAL_MODEL}' pulled? (ollama pull {LOCAL_MODEL})")
+            f"is model '{_local_settings()[1]}' pulled? "
+            f"(ollama pull {_local_settings()[1]})")
     except urllib.error.URLError as e:
         raise VerbatimError(
-            f"local AI server unreachable at {LOCAL_URL} ({e.reason}) — "
+            f"local AI server unreachable at {_local_settings()[0]} ({e.reason}) — "
             "start it (see docs/LOCAL-AI.md) or set VERBATIM_AI_ENGINE=claude")
     except TimeoutError:
         raise VerbatimError(f"local AI analysis timed out after {timeout}s")
+
+
+GLOSSARY_FILE = Path(os.environ.get(
+    "VERBATIM_GLOSSARY", HOME / ".config/verbatim/glossary.md"))
+
+
+def meeting_context_notes() -> str:
+    """What the model should know before reading any transcript: who is
+    recording ("recorder" in config.json) and the private glossary of names
+    and terms the speech-to-text tends to mis-hear. Empty if neither is set.
+    Both stay on this machine; nothing here is in the repo."""
+    parts = []
+    recorder = (read_config().get("recorder") or "").strip()
+    if recorder:
+        parts.append(
+            f'The person recording is **{recorder}**. If the transcript has a '
+            f'"You" label, that is {recorder}. If it only has numbered speakers '
+            f"(SPEAKER_00 and so on), work out which one is {recorder} from what "
+            f"people say: who is addressed by that name, and who speaks for "
+            f"{recorder}'s company. Check every action item's owner against "
+            f"who actually said they would do it.")
+    try:
+        glossary = GLOSSARY_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        glossary = ""
+    if glossary:
+        parts.append(
+            "GLOSSARY (correct spellings of people, companies and terms that "
+            "come up; use it to fix mis-heard names, and keep names exactly as "
+            "spelled here):\n" + glossary)
+    return "\n\n".join(parts)
+
+
+def _local_settings() -> tuple[str, str]:
+    """(url, model) for the local engine: environment, then config.json,
+    then the built-in defaults."""
+    cfg = read_config()
+    url = os.environ.get("VERBATIM_LOCAL_URL") or cfg.get("local_url") or LOCAL_URL
+    model = os.environ.get("VERBATIM_LOCAL_MODEL") or cfg.get("local_model") or LOCAL_MODEL
+    return url.rstrip("/"), model
+
+
+def _num_ctx(prompt: str) -> int:
+    """Context window for a prompt: about 3 characters a token, plus room for
+    an 8k-token answer, rounded up to 4k and capped at LOCAL_CTX_MAX."""
+    need = len(prompt) // 3 + 8192
+    return min(max(-(-need // 4096) * 4096, 8192), LOCAL_CTX_MAX)
 
 
 def _llm_local(prompt: str, timeout: int = 600) -> str:
@@ -464,16 +517,17 @@ def _llm_local(prompt: str, timeout: int = 600) -> str:
     falls back to OpenAI-compatible /v1/chat/completions for llama.cpp, vLLM
     and friends. Stdlib only — no pip deps."""
     import urllib.error
+    url, model = _local_settings()
     msgs = [{"role": "user", "content": prompt}]
     try:
-        data = _llm_post(f"{LOCAL_URL}/api/chat", {
-            "model": LOCAL_MODEL, "messages": msgs, "think": False,
-            "stream": False, "options": {"temperature": 0.2},
+        data = _llm_post(f"{url}/api/chat", {
+            "model": model, "messages": msgs, "think": False, "stream": False,
+            "options": {"temperature": 0.2, "num_ctx": _num_ctx(prompt)},
         }, timeout)
         out = (data.get("message") or {}).get("content", "")
     except urllib.error.HTTPError:
-        data = _llm_post(f"{LOCAL_URL}/v1/chat/completions", {
-            "model": LOCAL_MODEL, "messages": msgs,
+        data = _llm_post(f"{url}/v1/chat/completions", {
+            "model": model, "messages": msgs,
             "temperature": 0.2, "stream": False,
         }, timeout)
         try:
@@ -819,6 +873,9 @@ def identify_speakers(meeting_id: str, refresh: bool = False,
                          for u in utts)
     tmpl = (PROMPT_DIR / "identify.md").read_text(encoding="utf-8")
     prompt = tmpl.replace("{{NUMBERED}}", numbered)
+    notes = meeting_context_notes()
+    if notes:
+        prompt = notes + "\n\n" + prompt
     if roster:
         names = [n.strip() for n in re.split(r"[,;\n]", roster) if n.strip()]
         if names:
@@ -963,6 +1020,9 @@ def analyze(meeting_id: str, model: str | None = None, timeout: int = 600,
     ctx = (f"Title: {m.title or 'Untitled'}\n"
            f"Date: {m.started_dt:%A %d %B %Y, %H:%M}\n"
            f"Duration: {m.duration_human}")
+    notes = meeting_context_notes()
+    if notes:
+        ctx += "\n\n" + notes
     prompt = tmpl.replace("{{CONTEXT}}", ctx).replace("{{TRANSCRIPT}}", transcript)
 
     out = run_llm(prompt, timeout=timeout, engine=engine, model=model)

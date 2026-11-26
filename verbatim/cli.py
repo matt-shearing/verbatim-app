@@ -53,7 +53,7 @@ def _engine(a) -> str:
 
 
 def _engine_label(engine: str) -> str:
-    return {"local": f"local AI analysis ({core.LOCAL_MODEL})",
+    return {"local": f"local AI analysis ({core._local_settings()[1]})",
             "claude": "Claude AI analysis",
             "ollama": "basic local summary",
             "none": "transcript only"}[engine]
@@ -329,7 +329,7 @@ def _spawn_overlay() -> None:
 
 
 def cmd_identify(a) -> int:
-    print(f"🧠 Identifying speakers ({core.LOCAL_MODEL if core.AI_ENGINE == 'local' else 'Claude'})…", file=sys.stderr)
+    print(f"🧠 Identifying speakers ({core._local_settings()[1] if core.AI_ENGINE == 'local' else 'Claude'})…", file=sys.stderr)
     attr = core.identify_speakers(a.id, refresh=a.refresh, roster=a.who)
     from collections import Counter
     for name, n in Counter(attr.get("lines", {}).values()).most_common():

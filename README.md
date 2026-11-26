@@ -49,10 +49,10 @@ action-item table, open questions/risks, notable quotes, and a ready-to-send
 follow-up email draft.
 
 **By default this runs on a local model on our own hardware** — an
-OpenAI-compatible server (Ollama on a GPU node on the LAN, reached over an SSH
-tunnel), so **transcripts never leave the network**. See
+OpenAI-compatible server (Ollama on this machine's GPU by default, or a GPU
+node on the LAN over an SSH tunnel), so **transcripts never leave the network**. See
 **[`docs/LOCAL-AI.md`](docs/LOCAL-AI.md)** for the architecture, model choice
-(`gemma4:12b` primary, tested head-to-head) and configuration. The former
+(`qwen3.6:27b` primary, chosen by blind comparison) and configuration. The former
 cloud path via the Claude Code CLI is still available with `--claude` or
 `VERBATIM_AI_ENGINE=claude`. The analysis prompt lives in
 `verbatim/prompts/analysis.md` (edit to taste).
@@ -137,7 +137,8 @@ The transcript is saved before summarising starts, so a model failure never lose
 Notes are written with mode 600.
 
 Notes are written to `~/Meetings` (override with `VERBATIM_NOTES_DIR`). The
-local model defaults to `gemma4:12b` (override with `VERBATIM_LOCAL_MODEL`);
+local model defaults to `qwen3.6:27b` (override with `VERBATIM_LOCAL_MODEL`
+or `local_model` in `~/.config/verbatim/config.json`);
 the opt-in Claude model defaults to `sonnet` (`VERBATIM_CLAUDE_MODEL`).
 
 ## The GUI (`verbatim gui`)
